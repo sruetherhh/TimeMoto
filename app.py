@@ -4,103 +4,307 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+import os
+from io import BytesIO
 import re
 from typing import Dict, List, Optional
-import numpy as np
+import time
+import logging
 
-# Streamlit Konfiguration
-st.set_page_config(
-    page_title="TimeMoto Analytics",
-    page_icon="⏰",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Logging konfigurieren
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Custom CSS für Analytics Dashboard
-st.markdown("""
-<style>
-    .main-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 15px;
-        margin-bottom: 2rem;
-        color: white;
-        text-align: center;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-    }
+class RobustDatabaseManager:
+    """Robuste Datenbankverbindung mit dauerhafter Speicherung"""
     
-    .metric-card {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 10px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        border-left: 5px solid #667eea;
-        margin-bottom: 1rem;
-    }
+    def __init__(self):
+        self.connection_string = self._get_connection_string()
+        self.max_retries = 3
+        self.retry_delay = 2
     
-    .analytics-section {
-        background: #f8f9fa;
-        padding: 2rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-    }
-    
-    .insight-box {
-        background: linear-gradient(45deg, #e3f2fd, #f3e5f5);
-        border-radius: 10px;
-        padding: 1.5rem;
-        margin: 1rem 0;
-        border-left: 4px solid #2196f3;
-    }
-    
-    .warning-box {
-        background: #fff3cd;
-        border: 1px solid #ffeaa7;
-        border-radius: 8px;
-        padding: 1rem;
-        margin: 1rem 0;
-        color: #856404;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-class TimeMotoAnalytics:
-    """Erweiterte Analytics-Klasse für TimeMoto Daten"""
-    
-    def __init__(self, df: pd.DataFrame):
-        self.df = self.prepare_data(df)
-        self.insights = {}
-    
-    def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Bereitet die Daten für Analysen vor"""
-        # Kopie erstellen
-        df = df.copy()
+    def _get_connection_string(self) -> str:
+        """Erstellt die Verbindungszeichenfolge"""
+        # Option 1: DATABASE_URL
+        database_url = st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL"))
         
-        # Datum parsen
-        df['parsed_date'] = df['Date'].apply(self.parse_german_date)
-        df['weekday'] = pd.to_datetime(df['parsed_date']).dt.day_name()
-        df['week_number'] = pd.to_datetime(df['parsed_date']).dt.isocalendar().week
+        if database_url:
+            # Bereinige problematische Parameter
+            clean_url = database_url.replace("&channel_binding=require", "")
+            clean_url = clean_url.replace("channel_binding=require&", "")
+            clean_url = clean_url.replace("?channel_binding=require", "?sslmode=require")
+            
+            # Stelle sicher, dass SSL aktiviert ist
+            if "sslmode=" not in clean_url:
+                separator = "&" if "?" in clean_url else "?"
+                clean_url += f"{separator}sslmode=require"
+            
+            return clean_url
         
-        # Arbeitscodes aus Remarks extrahieren
-        df['work_code'] = df['Remarks'].apply(self.extract_work_code)
+        # Option 2: Einzelne Parameter
+        db_host = st.secrets.get("DB_HOST", os.getenv("DB_HOST"))
+        db_port = st.secrets.get("DB_PORT", os.getenv("DB_PORT", "5432"))
+        db_name = st.secrets.get("DB_NAME", os.getenv("DB_NAME"))
+        db_user = st.secrets.get("DB_USER", os.getenv("DB_USER"))
+        db_password = st.secrets.get("DB_PASSWORD", os.getenv("DB_PASSWORD"))
         
-        # Balance zu numerisch konvertieren
-        df['balance_minutes'] = df['Balance'].apply(self.time_to_minutes)
-        df['duration_minutes'] = df['DurationExcludingBreaks'].apply(self.time_to_minutes)
+        if not all([db_host, db_name, db_user, db_password]):
+            raise ValueError("Datenbankparameter unvollständig. Bitte DATABASE_URL oder alle DB_* Parameter setzen.")
         
-        # Arbeitszeitttyp klassifizieren
-        df['time_type'] = df.apply(self.classify_time_type, axis=1)
-        
-        # Total-Zeilen entfernen
-        df = df[df['Username'] != 'Total'].copy()
-        
-        return df
+        return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?sslmode=require"
     
-    def parse_german_date(self, date_str: str) -> Optional[str]:
-        """Konvertiert deutsches Datum zu ISO"""
+    def get_connection(self, autocommit=False):
+        """Erstellt eine robuste Datenbankverbindung"""
+        for attempt in range(self.max_retries):
+            try:
+                logger.info(f"Datenbankverbindung Versuch {attempt + 1}/{self.max_retries}")
+                
+                conn = psycopg2.connect(
+                    self.connection_string,
+                    connect_timeout=30,
+                    keepalives=1,
+                    keepalives_idle=600,
+                    keepalives_interval=30,
+                    keepalives_count=3
+                )
+                
+                if autocommit:
+                    conn.autocommit = True
+                
+                # Teste die Verbindung
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                
+                logger.info("Datenbankverbindung erfolgreich")
+                return conn
+                
+            except psycopg2.OperationalError as e:
+                error_msg = str(e).lower()
+                logger.warning(f"Verbindungsversuch {attempt + 1} fehlgeschlagen: {e}")
+                
+                if attempt < self.max_retries - 1:
+                    if "timeout" in error_msg or "connection" in error_msg:
+                        wait_time = self.retry_delay * (2 ** attempt)
+                        logger.info(f"Warte {wait_time} Sekunden vor nächstem Versuch...")
+                        time.sleep(wait_time)
+                        continue
+                
+                logger.error("Maximale Anzahl Verbindungsversuche erreicht")
+                raise
+                
+            except Exception as e:
+                logger.error(f"Unerwarteter Datenbankfehler: {e}")
+                raise
+        
+        raise psycopg2.OperationalError("Konnte keine Datenbankverbindung herstellen")
+    
+    def create_tables_with_validation(self) -> bool:
+        """Erstellt Tabellen und validiert sie"""
+        create_sql = """
+        -- Lösche Tabelle falls sie existiert (für Debugging)
+        -- DROP TABLE IF EXISTS time_entries CASCADE;
+        
+        CREATE TABLE IF NOT EXISTS time_entries (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) NOT NULL,
+            entry_date DATE NOT NULL,
+            start_time VARCHAR(10),
+            end_time VARCHAR(10),
+            breaks_duration VARCHAR(50),
+            total_duration VARCHAR(10),
+            duration_excluding_breaks VARCHAR(10),
+            work_schedule VARCHAR(10),
+            balance VARCHAR(10),
+            absence_name VARCHAR(100),
+            remarks TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            
+            -- Unique constraint für Duplikate vermeiden
+            CONSTRAINT unique_user_date UNIQUE(username, entry_date)
+        );
+        
+        -- Indices für Performance
+        CREATE INDEX IF NOT EXISTS idx_time_entries_user_date 
+        ON time_entries(username, entry_date);
+        
+        CREATE INDEX IF NOT EXISTS idx_time_entries_date 
+        ON time_entries(entry_date);
+        
+        CREATE INDEX IF NOT EXISTS idx_time_entries_username 
+        ON time_entries(username);
+        
+        -- Trigger für updated_at
+        CREATE OR REPLACE FUNCTION update_modified_column()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            NEW.updated_at = CURRENT_TIMESTAMP;
+            RETURN NEW;
+        END;
+        $$ language 'plpgsql';
+        
+        DROP TRIGGER IF EXISTS update_time_entries_updated_at ON time_entries;
+        CREATE TRIGGER update_time_entries_updated_at 
+            BEFORE UPDATE ON time_entries 
+            FOR EACH ROW EXECUTE FUNCTION update_modified_column();
+        """
+        
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Führe CREATE-Statements aus
+                    for statement in create_sql.split(';'):
+                        statement = statement.strip()
+                        if statement and not statement.startswith('--'):
+                            cur.execute(statement)
+                    
+                    conn.commit()
+                    logger.info("Tabellen erfolgreich erstellt")
+                    
+                    # Validiere Tabellenerstellung
+                    cur.execute("""
+                        SELECT column_name, data_type, is_nullable 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'time_entries'
+                        ORDER BY ordinal_position
+                    """)
+                    
+                    columns = cur.fetchall()
+                    if len(columns) >= 10:  # Mindestens 10 Spalten erwartet
+                        logger.info(f"Tabelle validiert: {len(columns)} Spalten gefunden")
+                        return True
+                    else:
+                        logger.error("Tabellenerstellung fehlgeschlagen - zu wenige Spalten")
+                        return False
+                        
+        except Exception as e:
+            logger.error(f"Fehler beim Erstellen der Tabellen: {e}")
+            st.error(f"❌ Tabellenerstellung fehlgeschlagen: {str(e)}")
+            return False
+    
+    def insert_time_entries_robust(self, df: pd.DataFrame) -> tuple[int, int, List[str]]:
+        """Robuste Dateneinfügung mit detailliertem Logging"""
+        inserted_count = 0
+        updated_count = 0
+        errors = []
+        
+        if df.empty:
+            return 0, 0, ["Keine Daten zum Einfügen"]
+        
+        # Bereinige DataFrame
+        df_clean = self._clean_dataframe(df)
+        
+        insert_sql = """
+        INSERT INTO time_entries (
+            username, entry_date, start_time, end_time, breaks_duration,
+            total_duration, duration_excluding_breaks, work_schedule,
+            balance, absence_name, remarks
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        ) ON CONFLICT (username, entry_date) 
+        DO UPDATE SET
+            start_time = EXCLUDED.start_time,
+            end_time = EXCLUDED.end_time,
+            breaks_duration = EXCLUDED.breaks_duration,
+            total_duration = EXCLUDED.total_duration,
+            duration_excluding_breaks = EXCLUDED.duration_excluding_breaks,
+            work_schedule = EXCLUDED.work_schedule,
+            balance = EXCLUDED.balance,
+            absence_name = EXCLUDED.absence_name,
+            remarks = EXCLUDED.remarks,
+            updated_at = CURRENT_TIMESTAMP
+        RETURNING id, 
+        (CASE WHEN created_at = updated_at THEN 'inserted' ELSE 'updated' END) as action
+        """
+        
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    for index, row in df_clean.iterrows():
+                        try:
+                            # Überspringe Total-Zeilen
+                            if str(row.get('Username', '')).strip().lower() == 'total':
+                                continue
+                            
+                            # Konvertiere Datum
+                            entry_date = self._parse_german_date(row.get('Date'))
+                            if not entry_date:
+                                errors.append(f"Zeile {index + 1}: Ungültiges Datum '{row.get('Date')}'")
+                                continue
+                            
+                            # Bereite Daten vor
+                            values = (
+                                str(row.get('Username', '')).strip(),
+                                entry_date,
+                                self._clean_string(row.get('StartTime')),
+                                self._clean_string(row.get('EndTime')),
+                                self._clean_string(row.get('Breaks')),
+                                self._clean_string(row.get('Duration')),
+                                self._clean_string(row.get('DurationExcludingBreaks')),
+                                self._clean_string(row.get('WorkSchedule')),
+                                self._clean_string(row.get('Balance')),
+                                self._clean_string(row.get('AbsenceName')) if pd.notna(row.get('AbsenceName')) else None,
+                                self._clean_string(row.get('Remarks')) if pd.notna(row.get('Remarks')) else None
+                            )
+                            
+                            # Führe INSERT aus
+                            cur.execute(insert_sql, values)
+                            result = cur.fetchone()
+                            
+                            if result:
+                                if result[1] == 'inserted':
+                                    inserted_count += 1
+                                else:
+                                    updated_count += 1
+                            
+                            logger.debug(f"Zeile {index + 1} erfolgreich verarbeitet: {row.get('Username')} - {entry_date}")
+                            
+                        except Exception as row_error:
+                            error_msg = f"Zeile {index + 1} ({row.get('Username', 'Unbekannt')}): {str(row_error)}"
+                            errors.append(error_msg)
+                            logger.warning(error_msg)
+                            continue
+                    
+                    # Explizit committen
+                    conn.commit()
+                    logger.info(f"Daten erfolgreich committet: {inserted_count} eingefügt, {updated_count} aktualisiert")
+                    
+                    # Validiere Einfügung
+                    cur.execute("SELECT COUNT(*) FROM time_entries")
+                    total_count = cur.fetchone()[0]
+                    logger.info(f"Gesamtzahl Einträge in Datenbank: {total_count}")
+                    
+        except Exception as e:
+            error_msg = f"Datenbankfehler beim Einfügen: {str(e)}"
+            errors.append(error_msg)
+            logger.error(error_msg)
+        
+        return inserted_count, updated_count, errors
+    
+    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Bereinigt DataFrame vor der Einfügung"""
+        df_clean = df.copy()
+        
+        # Entferne leere Zeilen
+        df_clean = df_clean.dropna(how='all')
+        
+        # Fülle NaN-Werte
+        for col in df_clean.columns:
+            if df_clean[col].dtype == 'object':
+                df_clean[col] = df_clean[col].fillna('')
+        
+        return df_clean
+    
+    def _clean_string(self, value) -> str:
+        """Bereinigt String-Werte"""
+        if pd.isna(value):
+            return ''
+        return str(value).strip()
+    
+    def _parse_german_date(self, date_str: str) -> Optional[str]:
+        """Konvertiert deutsches Datumsformat zu ISO"""
         if not date_str or pd.isna(date_str):
             return None
         
@@ -118,7 +322,7 @@ class TimeMotoAnalytics:
         }
         
         try:
-            english_date = date_str
+            english_date = str(date_str)
             for german, english in german_days.items():
                 english_date = english_date.replace(german, english)
             for german, english in german_months.items():
@@ -126,799 +330,259 @@ class TimeMotoAnalytics:
             
             parsed_date = datetime.strptime(english_date, "%A, %d. %B %Y")
             return parsed_date.strftime("%Y-%m-%d")
-        except:
+        except Exception as e:
+            logger.warning(f"Datum konnte nicht geparst werden: {date_str} - {e}")
             return None
     
-    def extract_work_code(self, remarks: str) -> Optional[str]:
-        """Extrahiert Arbeitscodesaus Remarks"""
-        if not remarks or pd.isna(remarks):
-            return None
-        
-        # Suche nach "Arbeitscodes: XXXX"
-        match = re.search(r'Arbeitscodes:\s*([^.\r\n]+)', str(remarks))
-        if match:
-            return match.group(1).strip()
-        return None
-    
-    def time_to_minutes(self, time_str: str) -> int:
-        """Konvertiert Zeitstring zu Minuten"""
-        if not time_str or pd.isna(time_str) or time_str in ['', '-']:
-            return 0
-        
+    def test_database_connection(self) -> tuple[bool, str, Dict]:
+        """Umfassender Datenbankverbindungstest"""
         try:
-            # Entferne Vorzeichen
-            clean_time = str(time_str).replace('+', '').replace('-', '')
+            start_time = time.time()
             
-            # Parse HH:MM Format
-            if ':' in clean_time:
-                parts = clean_time.split(':')
-                hours = int(parts[0])
-                minutes = int(parts[1])
-                total_minutes = hours * 60 + minutes
-                
-                # Berücksichtige negatives Vorzeichen
-                if str(time_str).startswith('-'):
-                    total_minutes = -total_minutes
-                
-                return total_minutes
-        except:
-            pass
-        
-        return 0
-    
-    def classify_time_type(self, row) -> str:
-        """Klassifiziert den Arbeitszeitttyp"""
-        start_time = str(row['StartTime'])
-        end_time = str(row['EndTime'])
-        absence = row['AbsenceName']
-        
-        if absence and not pd.isna(absence):
-            return 'Abwesenheit'
-        elif start_time == '-' or end_time == '-':
-            return 'Keine Erfassung'
-        elif start_time == '<':
-            return 'Früher Beginn'
-        elif end_time == '>':
-            return 'Spätes Ende'
-        elif start_time and end_time and start_time != '' and end_time != '':
-            return 'Normal'
-        else:
-            return 'Unbekannt'
-    
-    def get_employee_summary(self) -> pd.DataFrame:
-        """Erstellt Mitarbeiter-Zusammenfassung"""
-        summary = self.df.groupby('Username').agg({
-            'parsed_date': 'count',
-            'balance_minutes': 'sum',
-            'duration_minutes': 'sum',
-            'AbsenceName': lambda x: x.notna().sum(),
-            'work_code': lambda x: x.notna().sum()
-        }).reset_index()
-        
-        summary.columns = ['Mitarbeiter', 'Arbeitstage', 'Saldo_Minuten', 'Arbeitszeit_Minuten', 'Abwesenheiten', 'Projekte']
-        
-        # Konvertiere Minuten zurück zu Stunden
-        summary['Saldo_Stunden'] = round(summary['Saldo_Minuten'] / 60, 2)
-        summary['Arbeitszeit_Stunden'] = round(summary['Arbeitszeit_Minuten'] / 60, 2)
-        
-        return summary
-    
-    def get_daily_analysis(self) -> pd.DataFrame:
-        """Tägliche Analyse"""
-        daily = self.df.groupby('parsed_date').agg({
-            'Username': 'nunique',
-            'balance_minutes': 'sum',
-            'duration_minutes': 'sum',
-            'AbsenceName': lambda x: x.notna().sum(),
-            'time_type': lambda x: (x == 'Normal').sum()
-        }).reset_index()
-        
-        daily.columns = ['Datum', 'Mitarbeiter_Anzahl', 'Gesamt_Saldo_Min', 'Gesamt_Arbeitszeit_Min', 'Abwesenheiten', 'Normale_Erfassungen']
-        daily['Gesamt_Saldo_Std'] = round(daily['Gesamt_Saldo_Min'] / 60, 2)
-        daily['Gesamt_Arbeitszeit_Std'] = round(daily['Gesamt_Arbeitszeit_Min'] / 60, 2)
-        
-        return daily
-    
-    def get_work_code_analysis(self) -> pd.DataFrame:
-        """Analysiert Arbeitscodes/Projekte"""
-        work_codes = self.df[self.df['work_code'].notna()]
-        
-        if work_codes.empty:
-            return pd.DataFrame()
-        
-        analysis = work_codes.groupby(['work_code', 'Username']).agg({
-            'parsed_date': 'count',
-            'duration_minutes': 'sum'
-        }).reset_index()
-        
-        analysis.columns = ['Projekt', 'Mitarbeiter', 'Tage', 'Arbeitszeit_Minuten']
-        analysis['Arbeitszeit_Stunden'] = round(analysis['Arbeitszeit_Minuten'] / 60, 2)
-        
-        return analysis
-    
-    def get_absence_analysis(self) -> pd.DataFrame:
-        """Analysiert Abwesenheiten"""
-        absences = self.df[self.df['AbsenceName'].notna()]
-        
-        if absences.empty:
-            return pd.DataFrame()
-        
-        analysis = absences.groupby(['AbsenceName', 'Username']).agg({
-            'parsed_date': 'count'
-        }).reset_index()
-        
-        analysis.columns = ['Abwesenheitstyp', 'Mitarbeiter', 'Tage']
-        
-        return analysis
-    
-    def generate_insights(self) -> Dict:
-        """Generiert automatische Insights"""
-        insights = {}
-        
-        # Mitarbeiter mit meisten Überstunden
-        summary = self.get_employee_summary()
-        if not summary.empty:
-            top_overtime = summary.loc[summary['Saldo_Stunden'].idxmax()]
-            insights['top_overtime'] = {
-                'employee': top_overtime['Mitarbeiter'],
-                'hours': top_overtime['Saldo_Stunden']
-            }
-            
-            # Mitarbeiter mit meisten Minusstunden
-            bottom_overtime = summary.loc[summary['Saldo_Stunden'].idxmin()]
-            insights['most_undertime'] = {
-                'employee': bottom_overtime['Mitarbeiter'],
-                'hours': bottom_overtime['Saldo_Stunden']
-            }
-        
-        # Häufigste Arbeitscodes
-        work_codes = self.df[self.df['work_code'].notna()]['work_code'].value_counts()
-        if not work_codes.empty:
-            insights['top_project'] = {
-                'project': work_codes.index[0],
-                'count': work_codes.iloc[0]
-            }
-        
-        # Arbeitszeitmuster
-        time_types = self.df['time_type'].value_counts()
-        insights['time_patterns'] = time_types.to_dict()
-        
-        return insights
-
-class StreamlitAnalyticsApp:
-    """Hauptanwendung mit Analytics"""
-    
-    def __init__(self):
-        self.analytics = None
-    
-    def run(self):
-        """Startet die Analytics-Anwendung"""
-        # Header
-        st.markdown("""
-        <div class="main-header">
-            <h1>📊 TimeMoto Analytics Dashboard</h1>
-            <p>Professionelle Zeiterfassung mit erweiterten Auswertungen</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Sidebar Navigation
-        st.sidebar.title("📈 Analytics Navigation")
-        page = st.sidebar.selectbox(
-            "Auswertung wählen:",
-            [
-                "🏠 Übersicht",
-                "👥 Mitarbeiter-Analyse", 
-                "📅 Datums-Analyse",
-                "🏗️ Projekt-Analyse", 
-                "🏥 Abwesenheits-Analyse",
-                "⚡ Insights & KPIs",
-                "📤 Daten laden"
-            ]
-        )
-        
-        # Daten laden falls nicht vorhanden
-        if 'analytics_data' not in st.session_state:
-            if page != "📤 Daten laden":
-                st.warning("⚠️ Bitte laden Sie zuerst Daten über '📤 Daten laden'")
-                self.show_data_upload()
-                return
-        
-        # Seiten-Routing
-        if page == "🏠 Übersicht":
-            self.show_overview()
-        elif page == "👥 Mitarbeiter-Analyse":
-            self.show_employee_analysis()
-        elif page == "📅 Datums-Analyse":
-            self.show_date_analysis()
-        elif page == "🏗️ Projekt-Analyse":
-            self.show_project_analysis()
-        elif page == "🏥 Abwesenheits-Analyse":
-            self.show_absence_analysis()
-        elif page == "⚡ Insights & KPIs":
-            self.show_insights()
-        elif page == "📤 Daten laden":
-            self.show_data_upload()
-    
-    def show_data_upload(self):
-        """Daten-Upload Seite"""
-        st.header("📤 TimeMoto Daten laden")
-        
-        uploaded_file = st.file_uploader(
-            "Excel-Datei hochladen",
-            type=['xlsx', 'xls', 'csv'],
-            help="Laden Sie Ihre TimeMoto Export-Datei hoch"
-        )
-        
-        if uploaded_file is not None:
-            try:
-                # Datei laden
-                if uploaded_file.name.endswith(('.xlsx', '.xls')):
-                    df = pd.read_excel(uploaded_file)
-                else:
-                    df = pd.read_csv(uploaded_file)
-                
-                st.success(f"✅ Datei erfolgreich geladen: {len(df)} Zeilen")
-                
-                # Analytics-Objekt erstellen
-                self.analytics = TimeMotoAnalytics(df)
-                st.session_state.analytics_data = self.analytics
-                
-                # Schnelle Datenvorschau
-                with st.expander("👀 Datenvorschau", expanded=True):
-                    st.dataframe(df.head(), use_container_width=True)
-                
-                st.success("🎉 Daten erfolgreich verarbeitet! Sie können jetzt die Auswertungen verwenden.")
-                
-            except Exception as e:
-                st.error(f"❌ Fehler beim Laden der Datei: {str(e)}")
-    
-    def show_overview(self):
-        """Übersichts-Dashboard"""
-        if 'analytics_data' not in st.session_state:
-            return
-        
-        analytics = st.session_state.analytics_data
-        
-        st.header("🏠 Übersicht Dashboard")
-        
-        # KPI Metriken
-        col1, col2, col3, col4, col5 = st.columns(5)
-        
-        with col1:
-            total_employees = analytics.df['Username'].nunique()
-            st.metric("👥 Mitarbeiter", total_employees)
-        
-        with col2:
-            total_days = analytics.df['parsed_date'].nunique()
-            st.metric("📅 Erfassungstage", total_days)
-        
-        with col3:
-            total_hours = round(analytics.df['duration_minutes'].sum() / 60, 1)
-            st.metric("⏰ Gesamtstunden", f"{total_hours:,.1f}")
-        
-        with col4:
-            total_balance = round(analytics.df['balance_minutes'].sum() / 60, 1)
-            delta_color = "normal" if total_balance >= 0 else "inverse"
-            st.metric("⚖️ Gesamt-Saldo", f"{total_balance:+.1f}h", delta_color=delta_color)
-        
-        with col5:
-            total_absences = analytics.df['AbsenceName'].notna().sum()
-            st.metric("🏥 Abwesenheiten", total_absences)
-        
-        # Visualisierung
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Arbeitszeit pro Tag
-            daily_data = analytics.get_daily_analysis()
-            if not daily_data.empty:
-                fig = px.bar(
-                    daily_data, 
-                    x='Datum', 
-                    y='Gesamt_Arbeitszeit_Std',
-                    title="📊 Tägliche Gesamtarbeitszeit",
-                    labels={'Gesamt_Arbeitszeit_Std': 'Stunden'}
-                )
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # Saldo pro Tag
-            if not daily_data.empty:
-                fig = px.line(
-                    daily_data, 
-                    x='Datum', 
-                    y='Gesamt_Saldo_Std',
-                    title="📈 Täglicher Gesamt-Saldo",
-                    labels={'Gesamt_Saldo_Std': 'Saldo (Stunden)'}
-                )
-                fig.add_hline(y=0, line_dash="dash", line_color="gray")
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
-        
-        # Arbeitszeitmuster
-        st.subheader("🔍 Arbeitszeitmuster")
-        time_patterns = analytics.df['time_type'].value_counts()
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig = px.pie(
-                values=time_patterns.values,
-                names=time_patterns.index,
-                title="Verteilung der Arbeitszeitttypen"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # Top Mitarbeiter nach Arbeitszeit
-            employee_summary = analytics.get_employee_summary()
-            top_employees = employee_summary.nlargest(10, 'Arbeitszeit_Stunden')
-            
-            fig = px.bar(
-                top_employees,
-                x='Arbeitszeit_Stunden',
-                y='Mitarbeiter',
-                orientation='h',
-                title="🏆 Top 10 Mitarbeiter (Arbeitszeit)"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-    
-    def show_employee_analysis(self):
-        """Mitarbeiter-spezifische Analyse"""
-        if 'analytics_data' not in st.session_state:
-            return
-        
-        analytics = st.session_state.analytics_data
-        
-        st.header("👥 Mitarbeiter-Analyse")
-        
-        # Filter
-        employees = ['Alle'] + list(analytics.df['Username'].unique())
-        selected_employee = st.selectbox("👤 Mitarbeiter auswählen:", employees)
-        
-        if selected_employee == 'Alle':
-            # Alle Mitarbeiter Übersicht
-            summary = analytics.get_employee_summary()
-            
-            st.subheader("📊 Mitarbeiter-Übersicht")
-            st.dataframe(
-                summary[['Mitarbeiter', 'Arbeitstage', 'Arbeitszeit_Stunden', 'Saldo_Stunden', 'Abwesenheiten', 'Projekte']],
-                use_container_width=True
-            )
-            
-            # Visualisierungen
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # Saldo-Vergleich
-                fig = px.bar(
-                    summary, 
-                    x='Mitarbeiter', 
-                    y='Saldo_Stunden',
-                    title="⚖️ Saldo-Vergleich alle Mitarbeiter",
-                    color='Saldo_Stunden',
-                    color_continuous_scale='RdYlGn'
-                )
-                fig.update_xaxis(tickangle=45)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                # Arbeitszeit vs Saldo
-                fig = px.scatter(
-                    summary,
-                    x='Arbeitszeit_Stunden',
-                    y='Saldo_Stunden',
-                    size='Arbeitstage',
-                    hover_name='Mitarbeiter',
-                    title="💼 Arbeitszeit vs. Saldo",
-                    labels={
-                        'Arbeitszeit_Stunden': 'Arbeitszeit (Stunden)',
-                        'Saldo_Stunden': 'Saldo (Stunden)'
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    # Grundlegende Verbindung
+                    cur.execute("SELECT version()")
+                    version = cur.fetchone()['version']
+                    
+                    # Tabellen prüfen
+                    cur.execute("""
+                        SELECT table_name 
+                        FROM information_schema.tables 
+                        WHERE table_schema = 'public' AND table_name = 'time_entries'
+                    """)
+                    tables = cur.fetchall()
+                    
+                    # Datenanzahl prüfen
+                    if tables:
+                        cur.execute("SELECT COUNT(*) as count FROM time_entries")
+                        count_result = cur.fetchone()
+                        entry_count = count_result['count'] if count_result else 0
+                    else:
+                        entry_count = 0
+                    
+                    # Letzter Eintrag
+                    last_entry = None
+                    if entry_count > 0:
+                        cur.execute("""
+                            SELECT username, entry_date, created_at 
+                            FROM time_entries 
+                            ORDER BY created_at DESC 
+                            LIMIT 1
+                        """)
+                        last_entry = cur.fetchone()
+                    
+                    connection_time = round(time.time() - start_time, 2)
+                    
+                    info = {
+                        'version': version,
+                        'connection_time': connection_time,
+                        'tables_exist': len(tables) > 0,
+                        'entry_count': entry_count,
+                        'last_entry': dict(last_entry) if last_entry else None
                     }
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-        else:
-            # Einzelner Mitarbeiter
-            employee_data = analytics.df[analytics.df['Username'] == selected_employee]
-            
-            # Metriken für den Mitarbeiter
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                work_days = len(employee_data)
-                st.metric("📅 Arbeitstage", work_days)
-            
-            with col2:
-                total_hours = round(employee_data['duration_minutes'].sum() / 60, 1)
-                st.metric("⏰ Arbeitszeit", f"{total_hours}h")
-            
-            with col3:
-                balance = round(employee_data['balance_minutes'].sum() / 60, 1)
-                st.metric("⚖️ Saldo", f"{balance:+.1f}h")
-            
-            with col4:
-                absences = employee_data['AbsenceName'].notna().sum()
-                st.metric("🏥 Abwesenheiten", absences)
-            
-            # Detailanalyse
+                    
+                    return True, f"✅ Verbindung erfolgreich ({connection_time}s)", info
+                    
+        except Exception as e:
+            return False, f"❌ Verbindung fehlgeschlagen: {str(e)}", {}
+    
+    def get_statistics(self) -> Dict:
+        """Holt erweiterte Statistiken"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    stats = {}
+                    
+                    # Grundstatistiken
+                    cur.execute("SELECT COUNT(*) as total_entries FROM time_entries")
+                    result = cur.fetchone()
+                    stats['total_entries'] = result['total_entries'] if result else 0
+                    
+                    cur.execute("SELECT COUNT(DISTINCT username) as total_users FROM time_entries")
+                    result = cur.fetchone()
+                    stats['total_users'] = result['total_users'] if result else 0
+                    
+                    cur.execute("SELECT COUNT(*) as absences FROM time_entries WHERE absence_name IS NOT NULL AND absence_name != ''")
+                    result = cur.fetchone()
+                    stats['total_absences'] = result['absences'] if result else 0
+                    
+                    # Zeitstatistiken
+                    cur.execute("SELECT MIN(entry_date) as first_date, MAX(entry_date) as last_date FROM time_entries")
+                    result = cur.fetchone()
+                    if result and result['first_date']:
+                        stats['date_range'] = {
+                            'first_date': result['first_date'],
+                            'last_date': result['last_date']
+                        }
+                    
+                    # Letzter Import
+                    cur.execute("SELECT MAX(created_at) as last_import FROM time_entries")
+                    result = cur.fetchone()
+                    stats['last_import'] = result['last_import'] if result else None
+                    
+                    # Datenqualität
+                    cur.execute("""
+                        SELECT 
+                            COUNT(*) as total,
+                            COUNT(CASE WHEN start_time != '' AND start_time IS NOT NULL THEN 1 END) as with_start_time,
+                            COUNT(CASE WHEN end_time != '' AND end_time IS NOT NULL THEN 1 END) as with_end_time
+                        FROM time_entries
+                    """)
+                    result = cur.fetchone()
+                    if result:
+                        stats['data_quality'] = dict(result)
+                    
+                    return stats
+                    
+        except Exception as e:
+            logger.error(f"Fehler beim Abrufen der Statistiken: {e}")
+            return {'error': str(e)}
+    
+    def get_time_entries(self, limit: int = 100, offset: int = 0) -> pd.DataFrame:
+        """Holt Zeiterfassungsdaten mit Pagination"""
+        try:
+            with self.get_connection() as conn:
+                query = """
+                SELECT 
+                    id, username, entry_date, start_time, end_time, 
+                    breaks_duration, total_duration, duration_excluding_breaks,
+                    work_schedule, balance, absence_name, remarks, 
+                    created_at, updated_at
+                FROM time_entries 
+                ORDER BY entry_date DESC, username
+                LIMIT %s OFFSET %s
+                """
+                df = pd.read_sql(query, conn, params=[limit, offset])
+                logger.info(f"Abgerufen: {len(df)} Einträge (Limit: {limit}, Offset: {offset})")
+                return df
+        except Exception as e:
+            logger.error(f"Fehler beim Abrufen der Daten: {e}")
+            st.error(f"❌ Fehler beim Laden der Daten: {str(e)}")
+            return pd.DataFrame()
+    
+    def delete_all_entries(self) -> bool:
+        """Löscht alle Einträge (für Debugging)"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM time_entries")
+                    deleted_count = cur.rowcount
+                    conn.commit()
+                    logger.info(f"Alle Einträge gelöscht: {deleted_count}")
+                    return True
+        except Exception as e:
+            logger.error(f"Fehler beim Löschen: {e}")
+            return False
+
+# Streamlit App für Datenbanktest
+def show_database_diagnostics():
+    """Zeigt umfassende Datenbankdiagnostik"""
+    st.header("🔧 Datenbankdiagnostik")
+    
+    try:
+        db_manager = RobustDatabaseManager()
+        
+        # Verbindungstest
+        with st.expander("🔗 Verbindungstest", expanded=True):
+            if st.button("Verbindung testen"):
+                with st.spinner("Teste Datenbankverbindung..."):
+                    success, message, info = db_manager.test_database_connection()
+                
+                if success:
+                    st.success(message)
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Verbindungszeit", f"{info.get('connection_time', 0)}s")
+                        st.metric("Einträge in DB", info.get('entry_count', 0))
+                    
+                    with col2:
+                        st.metric("Tabellen vorhanden", "✅" if info.get('tables_exist') else "❌")
+                        if info.get('last_entry'):
+                            last = info['last_entry']
+                            st.write(f"**Letzter Eintrag:** {last.get('username')} am {last.get('entry_date')}")
+                    
+                    st.json(info)
+                else:
+                    st.error(message)
+        
+        # Tabellenerstellung
+        with st.expander("🏗️ Tabellen-Management"):
             col1, col2 = st.columns(2)
             
             with col1:
-                # Täglicher Saldo
-                daily_balance = employee_data.groupby('parsed_date')['balance_minutes'].sum() / 60
-                
-                fig = px.bar(
-                    x=daily_balance.index,
-                    y=daily_balance.values,
-                    title=f"📊 Täglicher Saldo - {selected_employee}",
-                    labels={'x': 'Datum', 'y': 'Saldo (Stunden)'}
-                )
-                fig.add_hline(y=0, line_dash="dash", line_color="gray")
-                st.plotly_chart(fig, use_container_width=True)
+                if st.button("Tabellen erstellen/aktualisieren"):
+                    with st.spinner("Erstelle Tabellen..."):
+                        success = db_manager.create_tables_with_validation()
+                    
+                    if success:
+                        st.success("✅ Tabellen erfolgreich erstellt/aktualisiert")
+                    else:
+                        st.error("❌ Fehler beim Erstellen der Tabellen")
             
             with col2:
-                # Arbeitszeitmuster
-                time_patterns = employee_data['time_type'].value_counts()
+                if st.button("⚠️ Alle Daten löschen"):
+                    if st.session_state.get('confirm_delete'):
+                        success = db_manager.delete_all_entries()
+                        if success:
+                            st.success("Alle Einträge gelöscht")
+                        st.session_state.confirm_delete = False
+                    else:
+                        st.session_state.confirm_delete = True
+                        st.warning("Nochmal klicken zum Bestätigen")
+        
+        # Statistiken
+        with st.expander("📊 Datenbankstatistiken"):
+            if st.button("Statistiken aktualisieren"):
+                stats = db_manager.get_statistics()
                 
-                fig = px.pie(
-                    values=time_patterns.values,
-                    names=time_patterns.index,
-                    title=f"🔍 Arbeitszeitmuster - {selected_employee}"
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                if 'error' not in stats:
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("Gesamteinträge", stats.get('total_entries', 0))
+                        st.metric("Mitarbeiter", stats.get('total_users', 0))
+                    
+                    with col2:
+                        st.metric("Abwesenheiten", stats.get('total_absences', 0))
+                        if stats.get('last_import'):
+                            st.write(f"**Letzter Import:** {stats['last_import']}")
+                    
+                    with col3:
+                        if stats.get('date_range'):
+                            st.write(f"**Zeitraum:** {stats['date_range']['first_date']} bis {stats['date_range']['last_date']}")
+                        
+                        if stats.get('data_quality'):
+                            quality = stats['data_quality']
+                            completion = round((quality['with_start_time'] / max(quality['total'], 1)) * 100, 1)
+                            st.metric("Datenqualität", f"{completion}%")
+                    
+                    st.json(stats)
+                else:
+                    st.error(f"Fehler bei Statistiken: {stats['error']}")
+        
+        # Datenvorschau
+        with st.expander("👀 Datenvorschau"):
+            col1, col2 = st.columns(2)
             
-            # Detailtabelle
-            st.subheader("📋 Detaildaten")
-            display_data = employee_data[['parsed_date', 'StartTime', 'EndTime', 'DurationExcludingBreaks', 'Balance', 'work_code', 'AbsenceName', 'time_type']].copy()
-            display_data.columns = ['Datum', 'Start', 'Ende', 'Arbeitszeit', 'Saldo', 'Projekt', 'Abwesenheit', 'Typ']
-            st.dataframe(display_data, use_container_width=True)
-    
-    def show_date_analysis(self):
-        """Datums-basierte Analyse"""
-        if 'analytics_data' not in st.session_state:
-            return
-        
-        analytics = st.session_state.analytics_data
-        
-        st.header("📅 Datums-Analyse")
-        
-        daily_data = analytics.get_daily_analysis()
-        
-        if daily_data.empty:
-            st.warning("Keine Daten für Datums-Analyse verfügbar.")
-            return
-        
-        # Datumsbereich
-        st.info(f"📊 Analyse für Zeitraum: {daily_data['Datum'].min()} bis {daily_data['Datum'].max()}")
-        
-        # Tagesvergleich
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Mitarbeiteranzahl pro Tag
-            fig = px.bar(
-                daily_data,
-                x='Datum',
-                y='Mitarbeiter_Anzahl',
-                title="👥 Anwesende Mitarbeiter pro Tag"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # Abwesenheiten pro Tag
-            fig = px.bar(
-                daily_data,
-                x='Datum',
-                y='Abwesenheiten',
-                title="🏥 Abwesenheiten pro Tag",
-                color='Abwesenheiten',
-                color_continuous_scale='Reds'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Wochentagsanalyse
-        analytics.df['weekday_num'] = pd.to_datetime(analytics.df['parsed_date']).dt.dayofweek
-        weekday_data = analytics.df.groupby(['weekday', 'weekday_num']).agg({
-            'Username': 'nunique',
-            'balance_minutes': 'sum',
-            'duration_minutes': 'sum'
-        }).reset_index().sort_values('weekday_num')
-        
-        weekday_data['balance_hours'] = weekday_data['balance_minutes'] / 60
-        weekday_data['duration_hours'] = weekday_data['duration_minutes'] / 60
-        
-        st.subheader("📊 Wochentagsanalyse")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig = px.bar(
-                weekday_data,
-                x='weekday',
-                y='duration_hours',
-                title="⏰ Durchschnittliche Arbeitszeit pro Wochentag"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            fig = px.bar(
-                weekday_data,
-                x='weekday',
-                y='balance_hours',
-                title="⚖️ Durchschnittlicher Saldo pro Wochentag",
-                color='balance_hours',
-                color_continuous_scale='RdYlGn'
-            )
-            fig.add_hline(y=0, line_dash="dash", line_color="gray")
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Detailtabelle
-        st.subheader("📋 Tägliche Übersicht")
-        st.dataframe(
-            daily_data[['Datum', 'Mitarbeiter_Anzahl', 'Gesamt_Arbeitszeit_Std', 'Gesamt_Saldo_Std', 'Abwesenheiten', 'Normale_Erfassungen']],
-            use_container_width=True
-        )
-    
-    def show_project_analysis(self):
-        """Projekt-basierte Analyse"""
-        if 'analytics_data' not in st.session_state:
-            return
-        
-        analytics = st.session_state.analytics_data
-        
-        st.header("🏗️ Projekt-Analyse")
-        
-        work_analysis = analytics.get_work_code_analysis()
-        
-        if work_analysis.empty:
-            st.warning("⚠️ Keine Projekt-/Arbeitscodedaten in den Remarks gefunden.")
-            st.info("💡 Stellen Sie sicher, dass Ihre Daten Arbeitscodes in den Bemerkungen enthalten.")
-            return
-        
-        # Projekt-Übersicht
-        project_summary = work_analysis.groupby('Projekt').agg({
-            'Mitarbeiter': 'nunique',
-            'Tage': 'sum',
-            'Arbeitszeit_Stunden': 'sum'
-        }).reset_index()
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            total_projects = len(project_summary)
-            st.metric("🏗️ Projekte", total_projects)
-        
-        with col2:
-            total_project_hours = round(project_summary['Arbeitszeit_Stunden'].sum(), 1)
-            st.metric("⏰ Projektzeit", f"{total_project_hours}h")
-        
-        with col3:
-            avg_project_size = round(project_summary['Arbeitszeit_Stunden'].mean(), 1)
-            st.metric("📊 Ø Projektgröße", f"{avg_project_size}h")
-        
-        # Visualisierungen
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Projektverteilung nach Zeit
-            fig = px.pie(
-                project_summary,
-                values='Arbeitszeit_Stunden',
-                names='Projekt',
-                title="⏰ Zeitverteilung nach Projekten"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # Mitarbeiter pro Projekt
-            fig = px.bar(
-                project_summary,
-                x='Projekt',
-                y='Mitarbeiter',
-                title="👥 Mitarbeiter pro Projekt"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Detailanalyse
-        st.subheader("📊 Projekt-Details")
-        
-        selected_project = st.selectbox(
-            "🏗️ Projekt auswählen:",
-            ['Alle'] + list(project_summary['Projekt'].unique())
-        )
-        
-        if selected_project == 'Alle':
-            st.dataframe(
-                project_summary[['Projekt', 'Mitarbeiter', 'Tage', 'Arbeitszeit_Stunden']],
-                use_container_width=True
-            )
-        else:
-            project_details = work_analysis[work_analysis['Projekt'] == selected_project]
+            with col1:
+                limit = st.number_input("Anzahl Einträge", min_value=1, max_value=1000, value=10)
             
-            # Mitarbeiterverteilung im Projekt
-            fig = px.bar(
-                project_details,
-                x='Mitarbeiter',
-                y='Arbeitszeit_Stunden',
-                title=f"👥 Mitarbeiterzeiten - {selected_project}"
-            )
-            fig.update_xaxis(tickangle=45)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.dataframe(
-                project_details[['Mitarbeiter', 'Tage', 'Arbeitszeit_Stunden']],
-                use_container_width=True
-            )
-    
-    def show_absence_analysis(self):
-        """Abwesenheits-Analyse"""
-        if 'analytics_data' not in st.session_state:
-            return
+            with col2:
+                if st.button("Daten laden"):
+                    df = db_manager.get_time_entries(limit=limit)
+                    
+                    if not df.empty:
+                        st.success(f"✅ {len(df)} Einträge geladen")
+                        st.dataframe(df, use_container_width=True)
+                    else:
+                        st.warning("Keine Daten gefunden")
         
-        analytics = st.session_state.analytics_data
-        
-        st.header("🏥 Abwesenheits-Analyse")
-        
-        absence_data = analytics.get_absence_analysis()
-        
-        if absence_data.empty:
-            st.info("ℹ️ Keine Abwesenheiten in den Daten gefunden.")
-            return
-        
-        # Abwesenheits-Übersicht
-        absence_summary = absence_data.groupby('Abwesenheitstyp').agg({
-            'Mitarbeiter': 'nunique',
-            'Tage': 'sum'
-        }).reset_index()
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            total_absence_days = absence_summary['Tage'].sum()
-            st.metric("📅 Abwesenheitstage", total_absence_days)
-        
-        with col2:
-            affected_employees = absence_data['Mitarbeiter'].nunique()
-            st.metric("👥 Betroffene Mitarbeiter", affected_employees)
-        
-        with col3:
-            absence_types = len(absence_summary)
-            st.metric("🏥 Abwesenheitstypen", absence_types)
-        
-        # Visualisierungen
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Abwesenheitstypen
-            fig = px.pie(
-                absence_summary,
-                values='Tage',
-                names='Abwesenheitstyp',
-                title="📊 Verteilung der Abwesenheitstypen"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # Mitarbeiter mit meisten Abwesenheiten
-            employee_absences = absence_data.groupby('Mitarbeiter')['Tage'].sum().reset_index()
-            top_absences = employee_absences.nlargest(10, 'Tage')
-            
-            fig = px.bar(
-                top_absences,
-                x='Tage',
-                y='Mitarbeiter',
-                orientation='h',
-                title="👥 Mitarbeiter mit meisten Abwesenheitstagen"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Detailanalyse
-        st.subheader("📋 Abwesenheits-Details")
-        st.dataframe(absence_data, use_container_width=True)
-    
-    def show_insights(self):
-        """KPIs und automatische Insights"""
-        if 'analytics_data' not in st.session_state:
-            return
-        
-        analytics = st.session_state.analytics_data
-        insights = analytics.generate_insights()
-        
-        st.header("⚡ Insights & KPIs")
-        
-        # Automatische Insights
-        st.subheader("🎯 Automatische Insights")
-        
-        if 'top_overtime' in insights:
-            st.markdown(f"""
-            <div class="insight-box">
-                <h4>🏆 Mitarbeiter mit meisten Überstunden</h4>
-                <p><strong>{insights['top_overtime']['employee']}</strong> hat <strong>{insights['top_overtime']['hours']:+.1f} Stunden</strong> Überstunden</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        if 'most_undertime' in insights:
-            st.markdown(f"""
-            <div class="warning-box">
-                <h4>⚠️ Mitarbeiter mit meisten Minusstunden</h4>
-                <p><strong>{insights['most_undertime']['employee']}</strong> hat <strong>{insights['most_undertime']['hours']:+.1f} Stunden</strong> Minusstunden</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        if 'top_project' in insights:
-            st.markdown(f"""
-            <div class="insight-box">
-                <h4>🏗️ Häufigstes Projekt</h4>
-                <p><strong>{insights['top_project']['project']}</strong> wurde <strong>{insights['top_project']['count']} mal</strong> erfasst</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # KPI Dashboard
-        st.subheader("📊 Key Performance Indicators")
-        
-        # Berechne KPIs
-        total_employees = analytics.df['Username'].nunique()
-        total_workdays = analytics.df.groupby('Username')['parsed_date'].nunique().mean()
-        avg_daily_hours = analytics.df.groupby(['Username', 'parsed_date'])['duration_minutes'].sum().mean() / 60
-        overtime_ratio = (analytics.df['balance_minutes'] > 0).mean() * 100
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("🎯 Ø Arbeitstage/MA", f"{total_workdays:.1f}")
-        
-        with col2:
-            st.metric("⏰ Ø Tägliche Arbeitszeit", f"{avg_daily_hours:.1f}h")
-        
-        with col3:
-            st.metric("📈 Überstunden-Quote", f"{overtime_ratio:.1f}%")
-        
-        with col4:
-            absence_rate = (analytics.df['AbsenceName'].notna().sum() / len(analytics.df)) * 100
-            st.metric("🏥 Abwesenheits-Quote", f"{absence_rate:.1f}%")
-        
-        # Trend-Analyse
-        st.subheader("📈 Trend-Analyse")
-        
-        daily_trends = analytics.get_daily_analysis()
-        if len(daily_trends) > 1:
-            # Berechne Trends
-            recent_avg = daily_trends.tail(2)['Gesamt_Arbeitszeit_Std'].mean()
-            overall_avg = daily_trends['Gesamt_Arbeitszeit_Std'].mean()
-            trend = ((recent_avg - overall_avg) / overall_avg) * 100
-            
-            trend_color = "normal" if trend >= 0 else "inverse"
-            st.metric(
-                "📊 Arbeitszeit-Trend (letzte vs. Durchschnitt)",
-                f"{trend:+.1f}%",
-                delta_color=trend_color
-            )
-        
-        # Export aller Insights
-        if st.button("📥 Insights-Report exportieren"):
-            report_data = {
-                'Zeitraum': f"{analytics.df['parsed_date'].min()} bis {analytics.df['parsed_date'].max()}",
-                'Mitarbeiter_Gesamt': total_employees,
-                'Durchschnittliche_Arbeitstage': round(total_workdays, 1),
-                'Durchschnittliche_Tagesarbeitszeit': round(avg_daily_hours, 1),
-                'Überstunden_Quote_Prozent': round(overtime_ratio, 1),
-                'Abwesenheits_Quote_Prozent': round(absence_rate, 1),
-                **insights
-            }
-            
-            import json
-            report_json = json.dumps(report_data, indent=2, ensure_ascii=False, default=str)
-            
-            st.download_button(
-                label="💾 JSON-Report herunterladen",
-                data=report_json,
-                file_name=f"timemoto_insights_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json"
-            )
+    except Exception as e:
+        st.error(f"❌ Fehler bei Datenbankdiagnostik: {str(e)}")
+        logger.error(f"Diagnostik-Fehler: {e}")
 
-# Anwendung starten
 if __name__ == "__main__":
-    app = StreamlitAnalyticsApp()
-    app.run()
+    st.set_page_config(page_title="Datenbankdiagnostik", layout="wide")
+    show_database_diagnostics()
