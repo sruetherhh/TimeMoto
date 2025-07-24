@@ -10,13 +10,64 @@ from io import BytesIO
 import re
 from typing import Dict, List, Optional
 import time
-import logging
 
-# Logging konfigurieren
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Konfiguration der Streamlit App
+st.set_page_config(
+    page_title="TimeMoto Zeiterfassung",
+    page_icon="⏰",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-class RobustDatabaseManager:
+# Custom CSS für modernes Design
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        padding: 2rem;
+        border-radius: 10px;
+        margin-bottom: 2rem;
+        color: white;
+        text-align: center;
+    }
+    
+    .metric-container {
+        background: white;
+        padding: 1rem;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-left: 4px solid #667eea;
+    }
+    
+    .success-message {
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+        color: #155724;
+    }
+    
+    .error-message {
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+        color: #721c24;
+    }
+    
+    .info-box {
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        border-left: 4px solid #17a2b8;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+class DatabaseManager:
     """Robuste Datenbankverbindung mit dauerhafter Speicherung"""
     
     def __init__(self):
@@ -25,8 +76,8 @@ class RobustDatabaseManager:
         self.retry_delay = 2
     
     def _get_connection_string(self) -> str:
-        """Erstellt die Verbindungszeichenfolge"""
-        # Option 1: DATABASE_URL
+        """Erstellt die Verbindungszeichenfolge für neon.tech"""
+        # Versuche zuerst DATABASE_URL (empfohlen für Neon.tech)
         database_url = st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL"))
         
         if database_url:
@@ -42,7 +93,7 @@ class RobustDatabaseManager:
             
             return clean_url
         
-        # Option 2: Einzelne Parameter
+        # Fallback auf einzelne Parameter
         db_host = st.secrets.get("DB_HOST", os.getenv("DB_HOST"))
         db_port = st.secrets.get("DB_PORT", os.getenv("DB_PORT", "5432"))
         db_name = st.secrets.get("DB_NAME", os.getenv("DB_NAME"))
@@ -50,16 +101,15 @@ class RobustDatabaseManager:
         db_password = st.secrets.get("DB_PASSWORD", os.getenv("DB_PASSWORD"))
         
         if not all([db_host, db_name, db_user, db_password]):
-            raise ValueError("Datenbankparameter unvollständig. Bitte DATABASE_URL oder alle DB_* Parameter setzen.")
+            st.error("⚠️ Datenbankverbindung nicht konfiguriert! Bitte DATABASE_URL oder einzelne DB-Parameter in secrets.toml setzen.")
+            st.stop()
         
         return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?sslmode=require"
     
-    def get_connection(self, autocommit=False):
-        """Erstellt eine robuste Datenbankverbindung"""
+    def get_connection(self):
+        """Erstellt eine robuste Datenbankverbindung mit Retry-Logik"""
         for attempt in range(self.max_retries):
             try:
-                logger.info(f"Datenbankverbindung Versuch {attempt + 1}/{self.max_retries}")
-                
                 conn = psycopg2.connect(
                     self.connection_string,
                     connect_timeout=30,
@@ -69,43 +119,31 @@ class RobustDatabaseManager:
                     keepalives_count=3
                 )
                 
-                if autocommit:
-                    conn.autocommit = True
-                
                 # Teste die Verbindung
                 with conn.cursor() as cur:
                     cur.execute("SELECT 1")
                     cur.fetchone()
                 
-                logger.info("Datenbankverbindung erfolgreich")
                 return conn
                 
             except psycopg2.OperationalError as e:
-                error_msg = str(e).lower()
-                logger.warning(f"Verbindungsversuch {attempt + 1} fehlgeschlagen: {e}")
-                
                 if attempt < self.max_retries - 1:
-                    if "timeout" in error_msg or "connection" in error_msg:
-                        wait_time = self.retry_delay * (2 ** attempt)
-                        logger.info(f"Warte {wait_time} Sekunden vor nächstem Versuch...")
-                        time.sleep(wait_time)
-                        continue
-                
-                logger.error("Maximale Anzahl Verbindungsversuche erreicht")
-                raise
-                
+                    wait_time = self.retry_delay * (2 ** attempt)
+                    st.warning(f"⏳ Verbindungsversuch {attempt + 1} fehlgeschlagen, versuche erneut in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    st.error(f"❌ Datenbankverbindung fehlgeschlagen nach {self.max_retries} Versuchen: {e}")
+                    return None
             except Exception as e:
-                logger.error(f"Unerwarteter Datenbankfehler: {e}")
-                raise
+                st.error(f"❌ Unerwarteter Datenbankfehler: {e}")
+                return None
         
-        raise psycopg2.OperationalError("Konnte keine Datenbankverbindung herstellen")
+        return None
     
-    def create_tables_with_validation(self) -> bool:
-        """Erstellt Tabellen und validiert sie"""
-        create_sql = """
-        -- Lösche Tabelle falls sie existiert (für Debugging)
-        -- DROP TABLE IF EXISTS time_entries CASCADE;
-        
+    def create_tables(self) -> bool:
+        """Erstellt die erforderlichen Tabellen"""
+        create_table_sql = """
         CREATE TABLE IF NOT EXISTS time_entries (
             id SERIAL PRIMARY KEY,
             username VARCHAR(100) NOT NULL,
@@ -121,12 +159,9 @@ class RobustDatabaseManager:
             remarks TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            
-            -- Unique constraint für Duplikate vermeiden
-            CONSTRAINT unique_user_date UNIQUE(username, entry_date)
+            UNIQUE(username, entry_date)
         );
         
-        -- Indices für Performance
         CREATE INDEX IF NOT EXISTS idx_time_entries_user_date 
         ON time_entries(username, entry_date);
         
@@ -135,66 +170,26 @@ class RobustDatabaseManager:
         
         CREATE INDEX IF NOT EXISTS idx_time_entries_username 
         ON time_entries(username);
-        
-        -- Trigger für updated_at
-        CREATE OR REPLACE FUNCTION update_modified_column()
-        RETURNS TRIGGER AS $$
-        BEGIN
-            NEW.updated_at = CURRENT_TIMESTAMP;
-            RETURN NEW;
-        END;
-        $$ language 'plpgsql';
-        
-        DROP TRIGGER IF EXISTS update_time_entries_updated_at ON time_entries;
-        CREATE TRIGGER update_time_entries_updated_at 
-            BEFORE UPDATE ON time_entries 
-            FOR EACH ROW EXECUTE FUNCTION update_modified_column();
         """
         
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Führe CREATE-Statements aus
-                    for statement in create_sql.split(';'):
-                        statement = statement.strip()
-                        if statement and not statement.startswith('--'):
-                            cur.execute(statement)
-                    
+                    cur.execute(create_table_sql)
                     conn.commit()
-                    logger.info("Tabellen erfolgreich erstellt")
-                    
-                    # Validiere Tabellenerstellung
-                    cur.execute("""
-                        SELECT column_name, data_type, is_nullable 
-                        FROM information_schema.columns 
-                        WHERE table_name = 'time_entries'
-                        ORDER BY ordinal_position
-                    """)
-                    
-                    columns = cur.fetchall()
-                    if len(columns) >= 10:  # Mindestens 10 Spalten erwartet
-                        logger.info(f"Tabelle validiert: {len(columns)} Spalten gefunden")
-                        return True
-                    else:
-                        logger.error("Tabellenerstellung fehlgeschlagen - zu wenige Spalten")
-                        return False
-                        
+            return True
         except Exception as e:
-            logger.error(f"Fehler beim Erstellen der Tabellen: {e}")
-            st.error(f"❌ Tabellenerstellung fehlgeschlagen: {str(e)}")
+            st.error(f"Fehler beim Erstellen der Tabellen: {str(e)}")
             return False
     
-    def insert_time_entries_robust(self, df: pd.DataFrame) -> tuple[int, int, List[str]]:
-        """Robuste Dateneinfügung mit detailliertem Logging"""
+    def insert_time_entries(self, df: pd.DataFrame) -> tuple[int, int]:
+        """Fügt Zeiterfassungsdaten in die Datenbank ein mit robuster Fehlerbehandlung"""
         inserted_count = 0
         updated_count = 0
-        errors = []
         
         if df.empty:
-            return 0, 0, ["Keine Daten zum Einfügen"]
-        
-        # Bereinige DataFrame
-        df_clean = self._clean_dataframe(df)
+            st.warning("Keine Daten zum Einfügen gefunden.")
+            return 0, 0
         
         insert_sql = """
         INSERT INTO time_entries (
@@ -219,10 +214,17 @@ class RobustDatabaseManager:
         (CASE WHEN created_at = updated_at THEN 'inserted' ELSE 'updated' END) as action
         """
         
+        conn = self.get_connection()
+        if not conn:
+            return 0, 0
+        
         try:
-            with self.get_connection() as conn:
+            with conn:
                 with conn.cursor() as cur:
-                    for index, row in df_clean.iterrows():
+                    progress_bar = st.progress(0)
+                    total_rows = len(df)
+                    
+                    for index, row in df.iterrows():
                         try:
                             # Überspringe Total-Zeilen
                             if str(row.get('Username', '')).strip().lower() == 'total':
@@ -231,22 +233,21 @@ class RobustDatabaseManager:
                             # Konvertiere Datum
                             entry_date = self._parse_german_date(row.get('Date'))
                             if not entry_date:
-                                errors.append(f"Zeile {index + 1}: Ungültiges Datum '{row.get('Date')}'")
                                 continue
                             
                             # Bereite Daten vor
                             values = (
                                 str(row.get('Username', '')).strip(),
                                 entry_date,
-                                self._clean_string(row.get('StartTime')),
-                                self._clean_string(row.get('EndTime')),
-                                self._clean_string(row.get('Breaks')),
-                                self._clean_string(row.get('Duration')),
-                                self._clean_string(row.get('DurationExcludingBreaks')),
-                                self._clean_string(row.get('WorkSchedule')),
-                                self._clean_string(row.get('Balance')),
-                                self._clean_string(row.get('AbsenceName')) if pd.notna(row.get('AbsenceName')) else None,
-                                self._clean_string(row.get('Remarks')) if pd.notna(row.get('Remarks')) else None
+                                str(row.get('StartTime', '')),
+                                str(row.get('EndTime', '')),
+                                str(row.get('Breaks', '')),
+                                str(row.get('Duration', '')),
+                                str(row.get('DurationExcludingBreaks', '')),
+                                str(row.get('WorkSchedule', '')),
+                                str(row.get('Balance', '')),
+                                str(row.get('AbsenceName', '')) if pd.notna(row.get('AbsenceName')) else None,
+                                str(row.get('Remarks', '')) if pd.notna(row.get('Remarks')) else None
                             )
                             
                             # Führe INSERT aus
@@ -259,61 +260,43 @@ class RobustDatabaseManager:
                                 else:
                                     updated_count += 1
                             
-                            logger.debug(f"Zeile {index + 1} erfolgreich verarbeitet: {row.get('Username')} - {entry_date}")
+                            # Update Progress
+                            progress_bar.progress((index + 1) / total_rows)
                             
                         except Exception as row_error:
-                            error_msg = f"Zeile {index + 1} ({row.get('Username', 'Unbekannt')}): {str(row_error)}"
-                            errors.append(error_msg)
-                            logger.warning(error_msg)
+                            st.warning(f"Zeile {index + 1} übersprungen: {str(row_error)}")
                             continue
                     
                     # Explizit committen
                     conn.commit()
-                    logger.info(f"Daten erfolgreich committet: {inserted_count} eingefügt, {updated_count} aktualisiert")
+                    progress_bar.empty()
                     
-                    # Validiere Einfügung
+                    # Validiere die Einfügung
                     cur.execute("SELECT COUNT(*) FROM time_entries")
-                    total_count = cur.fetchone()[0]
-                    logger.info(f"Gesamtzahl Einträge in Datenbank: {total_count}")
+                    total_in_db = cur.fetchone()[0]
+                    st.info(f"✅ Daten erfolgreich gespeichert. Gesamt in Datenbank: {total_in_db} Einträge")
                     
         except Exception as e:
-            error_msg = f"Datenbankfehler beim Einfügen: {str(e)}"
-            errors.append(error_msg)
-            logger.error(error_msg)
+            st.error(f"❌ Fehler beim Einfügen der Daten: {str(e)}")
+            return 0, 0
+        finally:
+            conn.close()
         
-        return inserted_count, updated_count, errors
-    
-    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Bereinigt DataFrame vor der Einfügung"""
-        df_clean = df.copy()
-        
-        # Entferne leere Zeilen
-        df_clean = df_clean.dropna(how='all')
-        
-        # Fülle NaN-Werte
-        for col in df_clean.columns:
-            if df_clean[col].dtype == 'object':
-                df_clean[col] = df_clean[col].fillna('')
-        
-        return df_clean
-    
-    def _clean_string(self, value) -> str:
-        """Bereinigt String-Werte"""
-        if pd.isna(value):
-            return ''
-        return str(value).strip()
+        return inserted_count, updated_count
     
     def _parse_german_date(self, date_str: str) -> Optional[str]:
         """Konvertiert deutsches Datumsformat zu ISO"""
         if not date_str or pd.isna(date_str):
             return None
         
+        # Deutsche Wochentage zu englischen
         german_days = {
             'Montag': 'Monday', 'Dienstag': 'Tuesday', 'Mittwoch': 'Wednesday',
             'Donnerstag': 'Thursday', 'Freitag': 'Friday', 'Samstag': 'Saturday',
             'Sonntag': 'Sunday'
         }
         
+        # Deutsche Monate zu englischen
         german_months = {
             'Januar': 'January', 'Februar': 'February', 'März': 'March',
             'April': 'April', 'Mai': 'May', 'Juni': 'June',
@@ -322,267 +305,385 @@ class RobustDatabaseManager:
         }
         
         try:
-            english_date = str(date_str)
+            # Ersetze deutsche Begriffe
+            english_date = date_str
             for german, english in german_days.items():
                 english_date = english_date.replace(german, english)
             for german, english in german_months.items():
                 english_date = english_date.replace(german, english)
             
+            # Parse das Datum
+            # Format: "Montag, 14. Juli 2025" -> "Monday, 14. July 2025"
             parsed_date = datetime.strptime(english_date, "%A, %d. %B %Y")
             return parsed_date.strftime("%Y-%m-%d")
-        except Exception as e:
-            logger.warning(f"Datum konnte nicht geparst werden: {date_str} - {e}")
+        except:
             return None
     
-    def test_database_connection(self) -> tuple[bool, str, Dict]:
-        """Umfassender Datenbankverbindungstest"""
-        try:
-            start_time = time.time()
-            
-            with self.get_connection() as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    # Grundlegende Verbindung
-                    cur.execute("SELECT version()")
-                    version = cur.fetchone()['version']
-                    
-                    # Tabellen prüfen
-                    cur.execute("""
-                        SELECT table_name 
-                        FROM information_schema.tables 
-                        WHERE table_schema = 'public' AND table_name = 'time_entries'
-                    """)
-                    tables = cur.fetchall()
-                    
-                    # Datenanzahl prüfen
-                    if tables:
-                        cur.execute("SELECT COUNT(*) as count FROM time_entries")
-                        count_result = cur.fetchone()
-                        entry_count = count_result['count'] if count_result else 0
-                    else:
-                        entry_count = 0
-                    
-                    # Letzter Eintrag
-                    last_entry = None
-                    if entry_count > 0:
-                        cur.execute("""
-                            SELECT username, entry_date, created_at 
-                            FROM time_entries 
-                            ORDER BY created_at DESC 
-                            LIMIT 1
-                        """)
-                        last_entry = cur.fetchone()
-                    
-                    connection_time = round(time.time() - start_time, 2)
-                    
-                    info = {
-                        'version': version,
-                        'connection_time': connection_time,
-                        'tables_exist': len(tables) > 0,
-                        'entry_count': entry_count,
-                        'last_entry': dict(last_entry) if last_entry else None
-                    }
-                    
-                    return True, f"✅ Verbindung erfolgreich ({connection_time}s)", info
-                    
-        except Exception as e:
-            return False, f"❌ Verbindung fehlgeschlagen: {str(e)}", {}
-    
     def get_statistics(self) -> Dict:
-        """Holt erweiterte Statistiken"""
+        """Holt Statistiken aus der Datenbank"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    stats = {}
-                    
                     # Grundstatistiken
                     cur.execute("SELECT COUNT(*) as total_entries FROM time_entries")
-                    result = cur.fetchone()
-                    stats['total_entries'] = result['total_entries'] if result else 0
+                    total_entries = cur.fetchone()['total_entries']
                     
                     cur.execute("SELECT COUNT(DISTINCT username) as total_users FROM time_entries")
-                    result = cur.fetchone()
-                    stats['total_users'] = result['total_users'] if result else 0
+                    total_users = cur.fetchone()['total_users']
                     
-                    cur.execute("SELECT COUNT(*) as absences FROM time_entries WHERE absence_name IS NOT NULL AND absence_name != ''")
-                    result = cur.fetchone()
-                    stats['total_absences'] = result['absences'] if result else 0
-                    
-                    # Zeitstatistiken
-                    cur.execute("SELECT MIN(entry_date) as first_date, MAX(entry_date) as last_date FROM time_entries")
-                    result = cur.fetchone()
-                    if result and result['first_date']:
-                        stats['date_range'] = {
-                            'first_date': result['first_date'],
-                            'last_date': result['last_date']
-                        }
+                    cur.execute("SELECT COUNT(*) as absences FROM time_entries WHERE absence_name IS NOT NULL")
+                    total_absences = cur.fetchone()['absences']
                     
                     # Letzter Import
                     cur.execute("SELECT MAX(created_at) as last_import FROM time_entries")
-                    result = cur.fetchone()
-                    stats['last_import'] = result['last_import'] if result else None
+                    last_import = cur.fetchone()['last_import']
                     
-                    # Datenqualität
-                    cur.execute("""
-                        SELECT 
-                            COUNT(*) as total,
-                            COUNT(CASE WHEN start_time != '' AND start_time IS NOT NULL THEN 1 END) as with_start_time,
-                            COUNT(CASE WHEN end_time != '' AND end_time IS NOT NULL THEN 1 END) as with_end_time
-                        FROM time_entries
-                    """)
-                    result = cur.fetchone()
-                    if result:
-                        stats['data_quality'] = dict(result)
-                    
-                    return stats
-                    
+                    return {
+                        'total_entries': total_entries,
+                        'total_users': total_users,
+                        'total_absences': total_absences,
+                        'last_import': last_import
+                    }
         except Exception as e:
-            logger.error(f"Fehler beim Abrufen der Statistiken: {e}")
-            return {'error': str(e)}
+            st.error(f"Fehler beim Abrufen der Statistiken: {str(e)}")
+            return {}
     
-    def get_time_entries(self, limit: int = 100, offset: int = 0) -> pd.DataFrame:
-        """Holt Zeiterfassungsdaten mit Pagination"""
+    def get_time_entries(self, limit: int = 100) -> pd.DataFrame:
+        """Holt Zeiterfassungsdaten aus der Datenbank"""
         try:
             with self.get_connection() as conn:
                 query = """
-                SELECT 
-                    id, username, entry_date, start_time, end_time, 
-                    breaks_duration, total_duration, duration_excluding_breaks,
-                    work_schedule, balance, absence_name, remarks, 
-                    created_at, updated_at
+                SELECT username, entry_date, start_time, end_time, 
+                       breaks_duration, total_duration, duration_excluding_breaks,
+                       work_schedule, balance, absence_name, remarks, created_at
                 FROM time_entries 
                 ORDER BY entry_date DESC, username
-                LIMIT %s OFFSET %s
+                LIMIT %s
                 """
-                df = pd.read_sql(query, conn, params=[limit, offset])
-                logger.info(f"Abgerufen: {len(df)} Einträge (Limit: {limit}, Offset: {offset})")
+                df = pd.read_sql(query, conn, params=[limit])
                 return df
         except Exception as e:
-            logger.error(f"Fehler beim Abrufen der Daten: {e}")
-            st.error(f"❌ Fehler beim Laden der Daten: {str(e)}")
+            st.error(f"Fehler beim Abrufen der Daten: {str(e)}")
             return pd.DataFrame()
+
+class TimeMotoApp:
+    """Hauptanwendungsklasse"""
     
-    def delete_all_entries(self) -> bool:
-        """Löscht alle Einträge (für Debugging)"""
+    def __init__(self):
+        self.db_manager = DatabaseManager()
+    
+    def run(self):
+        """Startet die Streamlit Anwendung"""
+        # Header
+        st.markdown("""
+        <div class="main-header">
+            <h1>⏰ TimeMoto Zeiterfassung</h1>
+            <p>Professionelle Verwaltung von Zeiterfassungsdaten</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Sidebar Navigation
+        st.sidebar.title("🔧 Navigation")
+        page = st.sidebar.selectbox(
+            "Seite auswählen:",
+            ["📊 Dashboard", "📤 Daten importieren", "📋 Daten anzeigen", "⚙️ Einstellungen"]
+        )
+        
+        # Seiten-Routing
+        if page == "📊 Dashboard":
+            self.show_dashboard()
+        elif page == "📤 Daten importieren":
+            self.show_import_page()
+        elif page == "📋 Daten anzeigen":
+            self.show_data_view()
+        elif page == "⚙️ Einstellungen":
+            self.show_settings()
+    
+    def show_dashboard(self):
+        """Zeigt das Dashboard"""
+        st.header("📊 Dashboard")
+        
+        # Datenbankverbindung testen
+        if not self.test_database_connection():
+            return
+        
+        # Statistiken abrufen
+        stats = self.db_manager.get_statistics()
+        
+        if stats:
+            # Metriken anzeigen
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    label="📝 Gesamte Einträge",
+                    value=stats.get('total_entries', 0)
+                )
+            
+            with col2:
+                st.metric(
+                    label="👥 Mitarbeiter",
+                    value=stats.get('total_users', 0)
+                )
+            
+            with col3:
+                st.metric(
+                    label="🏥 Abwesenheiten",
+                    value=stats.get('total_absences', 0)
+                )
+            
+            with col4:
+                last_import = stats.get('last_import')
+                if last_import:
+                    import_text = last_import.strftime("%d.%m.%Y %H:%M")
+                else:
+                    import_text = "Noch keine Daten"
+                
+                st.metric(
+                    label="📅 Letzter Import",
+                    value=import_text
+                )
+        
+        # Visualisierungen
+        if stats and stats.get('total_entries', 0) > 0:
+            self.show_charts()
+    
+    def show_import_page(self):
+        """Zeigt die Import-Seite"""
+        st.header("📤 Daten importieren")
+        
+        # Datenbankverbindung testen
+        if not self.test_database_connection():
+            return
+        
+        # Tabellen erstellen
+        if not self.db_manager.create_tables():
+            st.error("❌ Fehler beim Erstellen der Datenbanktabellen!")
+            return
+        
+        st.markdown("""
+        <div class="info-box">
+            <h4>📋 Unterstützte Dateiformate</h4>
+            <ul>
+                <li><strong>Excel (.xlsx, .xls):</strong> TimeMoto Export Dateien</li>
+                <li><strong>CSV (.csv):</strong> Komma-getrennte Werte</li>
+            </ul>
+            <p><strong>Erwartete Spalten:</strong> Username, Date, StartTime, EndTime, Breaks, Duration, DurationExcludingBreaks, WorkSchedule, Balance, AbsenceName, Remarks</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Datei-Upload
+        uploaded_file = st.file_uploader(
+            "📁 TimeMoto Export-Datei auswählen",
+            type=['xlsx', 'xls', 'csv'],
+            help="Unterstützte Formate: Excel (.xlsx, .xls) und CSV (.csv)"
+        )
+        
+        if uploaded_file is not None:
+            try:
+                # Datei lesen
+                if uploaded_file.name.endswith(('.xlsx', '.xls')):
+                    df = pd.read_excel(uploaded_file)
+                else:
+                    df = pd.read_csv(uploaded_file)
+                
+                st.success(f"✅ Datei erfolgreich gelesen: {len(df)} Zeilen gefunden")
+                
+                # Datenvorschau
+                with st.expander("👀 Datenvorschau", expanded=True):
+                    st.dataframe(df.head(10), use_container_width=True)
+                
+                # Validierung
+                required_columns = ['Username', 'Date', 'StartTime', 'EndTime', 'Duration']
+                missing_columns = [col for col in required_columns if col not in df.columns]
+                
+                if missing_columns:
+                    st.error(f"❌ Fehlende Spalten: {', '.join(missing_columns)}")
+                    st.info("💡 Stellen Sie sicher, dass die Datei die richtige Struktur hat.")
+                    return
+                
+                # Import-Button
+                if st.button("🚀 Daten importieren", type="primary", use_container_width=True):
+                    with st.spinner("Importiere Daten..."):
+                        inserted, updated = self.db_manager.insert_time_entries(df)
+                    
+                    if inserted > 0 or updated > 0:
+                        st.markdown(f"""
+                        <div class="success-message">
+                            <h4>✅ Import erfolgreich!</h4>
+                            <ul>
+                                <li><strong>Neue Einträge:</strong> {inserted}</li>
+                                <li><strong>Aktualisierte Einträge:</strong> {updated}</li>
+                                <li><strong>Gesamt verarbeitet:</strong> {inserted + updated}</li>
+                            </ul>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Cache leeren für Dashboard-Update
+                        st.cache_data.clear()
+                    else:
+                        st.warning("⚠️ Keine Daten wurden importiert. Möglicherweise sind alle Einträge bereits vorhanden.")
+            
+            except Exception as e:
+                st.error(f"❌ Fehler beim Verarbeiten der Datei: {str(e)}")
+    
+    def show_data_view(self):
+        """Zeigt die Datenansicht"""
+        st.header("📋 Zeiterfassungsdaten")
+        
+        if not self.test_database_connection():
+            return
+        
+        # Filter-Optionen
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            limit = st.selectbox(
+                "📊 Anzahl Einträge:",
+                [50, 100, 200, 500, 1000],
+                index=1
+            )
+        
+        with col2:
+            if st.button("🔄 Daten aktualisieren"):
+                st.cache_data.clear()
+        
+        # Daten laden
+        df = self.db_manager.get_time_entries(limit)
+        
+        if not df.empty:
+            st.info(f"📈 {len(df)} Einträge gefunden")
+            
+            # Interaktive Tabelle
+            st.dataframe(
+                df,
+                use_container_width=True,
+                column_config={
+                    "entry_date": st.column_config.DateColumn("Datum"),
+                    "username": st.column_config.TextColumn("Mitarbeiter"),
+                    "start_time": st.column_config.TextColumn("Start"),
+                    "end_time": st.column_config.TextColumn("Ende"),
+                    "total_duration": st.column_config.TextColumn("Dauer"),
+                    "balance": st.column_config.TextColumn("Saldo"),
+                    "absence_name": st.column_config.TextColumn("Abwesenheit")
+                }
+            )
+            
+            # Export-Option
+            if st.button("📥 Als CSV exportieren"):
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    label="💾 CSV herunterladen",
+                    data=csv,
+                    file_name=f"zeiterfassung_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.info("📭 Keine Daten gefunden. Importieren Sie zuerst TimeMoto Daten.")
+    
+    def show_settings(self):
+        """Zeigt die Einstellungen"""
+        st.header("⚙️ Einstellungen")
+        
+        # Datenbankstatus
+        st.subheader("🗄️ Datenbankverbindung")
+        
+        if self.test_database_connection():
+            st.success("✅ Datenbankverbindung aktiv")
+            
+            # Tabellenstatus
+            try:
+                stats = self.db_manager.get_statistics()
+                if stats:
+                    st.info(f"📊 Datenbank enthält {stats.get('total_entries', 0)} Einträge")
+            except:
+                pass
+        else:
+            st.error("❌ Datenbankverbindung fehlgeschlagen")
+        
+        # Konfigurationshilfe
+        st.subheader("🔧 Konfiguration")
+        
+        st.markdown("""
+        <div class="info-box">
+            <h4>📝 Neon.tech Konfiguration</h4>
+            <p><strong>Option 1 (Empfohlen):</strong> Verwenden Sie DATABASE_URL in <code>secrets.toml</code>:</p>
+            <pre>
+[secrets]
+DATABASE_URL = "postgresql://username:password@host/database?sslmode=require"
+            </pre>
+            
+            <p><strong>Option 2:</strong> Einzelne Parameter in <code>secrets.toml</code>:</p>
+            <pre>
+[secrets]
+DB_HOST = "your-neon-host.neon.tech"
+DB_PORT = "5432"
+DB_NAME = "your_database_name"
+DB_USER = "your_username"
+DB_PASSWORD = "your_password"
+            </pre>
+            
+            <p><strong>Für Streamlit Cloud:</strong> Setzen Sie die gleichen Werte in den App-Secrets.</p>
+            
+            <h5>🔍 Troubleshooting:</h5>
+            <ul>
+                <li>Entfernen Sie <code>channel_binding=require</code> aus der URL</li>
+                <li>Verwenden Sie nur <code>sslmode=require</code></li>
+                <li>Stellen Sie sicher, dass der Pooler-Endpoint verwendet wird</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    def show_charts(self):
+        """Zeigt Diagramme und Visualisierungen"""
+        st.subheader("📈 Visualisierungen")
+        
+        # Daten für Charts laden
+        df = self.db_manager.get_time_entries(1000)
+        
+        if not df.empty:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Mitarbeiter-Verteilung
+                user_counts = df['username'].value_counts()
+                fig_users = px.bar(
+                    x=user_counts.values,
+                    y=user_counts.index,
+                    orientation='h',
+                    title="Einträge pro Mitarbeiter",
+                    labels={'x': 'Anzahl Einträge', 'y': 'Mitarbeiter'}
+                )
+                fig_users.update_layout(height=400)
+                st.plotly_chart(fig_users, use_container_width=True)
+            
+            with col2:
+                # Abwesenheiten
+                absence_data = df[df['absence_name'].notna()]
+                if not absence_data.empty:
+                    absence_counts = absence_data['absence_name'].value_counts()
+                    fig_absence = px.pie(
+                        values=absence_counts.values,
+                        names=absence_counts.index,
+                        title="Verteilung der Abwesenheiten"
+                    )
+                    fig_absence.update_layout(height=400)
+                    st.plotly_chart(fig_absence, use_container_width=True)
+                else:
+                    st.info("Keine Abwesenheitsdaten gefunden")
+    
+    def test_database_connection(self) -> bool:
+        """Testet die Datenbankverbindung"""
         try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM time_entries")
-                    deleted_count = cur.rowcount
-                    conn.commit()
-                    logger.info(f"Alle Einträge gelöscht: {deleted_count}")
-                    return True
-        except Exception as e:
-            logger.error(f"Fehler beim Löschen: {e}")
+            conn = self.db_manager.get_connection()
+            if conn:
+                conn.close()
+                return True
+            return False
+        except:
             return False
 
-# Streamlit App für Datenbanktest
-def show_database_diagnostics():
-    """Zeigt umfassende Datenbankdiagnostik"""
-    st.header("🔧 Datenbankdiagnostik")
-    
-    try:
-        db_manager = RobustDatabaseManager()
-        
-        # Verbindungstest
-        with st.expander("🔗 Verbindungstest", expanded=True):
-            if st.button("Verbindung testen"):
-                with st.spinner("Teste Datenbankverbindung..."):
-                    success, message, info = db_manager.test_database_connection()
-                
-                if success:
-                    st.success(message)
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Verbindungszeit", f"{info.get('connection_time', 0)}s")
-                        st.metric("Einträge in DB", info.get('entry_count', 0))
-                    
-                    with col2:
-                        st.metric("Tabellen vorhanden", "✅" if info.get('tables_exist') else "❌")
-                        if info.get('last_entry'):
-                            last = info['last_entry']
-                            st.write(f"**Letzter Eintrag:** {last.get('username')} am {last.get('entry_date')}")
-                    
-                    st.json(info)
-                else:
-                    st.error(message)
-        
-        # Tabellenerstellung
-        with st.expander("🏗️ Tabellen-Management"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if st.button("Tabellen erstellen/aktualisieren"):
-                    with st.spinner("Erstelle Tabellen..."):
-                        success = db_manager.create_tables_with_validation()
-                    
-                    if success:
-                        st.success("✅ Tabellen erfolgreich erstellt/aktualisiert")
-                    else:
-                        st.error("❌ Fehler beim Erstellen der Tabellen")
-            
-            with col2:
-                if st.button("⚠️ Alle Daten löschen"):
-                    if st.session_state.get('confirm_delete'):
-                        success = db_manager.delete_all_entries()
-                        if success:
-                            st.success("Alle Einträge gelöscht")
-                        st.session_state.confirm_delete = False
-                    else:
-                        st.session_state.confirm_delete = True
-                        st.warning("Nochmal klicken zum Bestätigen")
-        
-        # Statistiken
-        with st.expander("📊 Datenbankstatistiken"):
-            if st.button("Statistiken aktualisieren"):
-                stats = db_manager.get_statistics()
-                
-                if 'error' not in stats:
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.metric("Gesamteinträge", stats.get('total_entries', 0))
-                        st.metric("Mitarbeiter", stats.get('total_users', 0))
-                    
-                    with col2:
-                        st.metric("Abwesenheiten", stats.get('total_absences', 0))
-                        if stats.get('last_import'):
-                            st.write(f"**Letzter Import:** {stats['last_import']}")
-                    
-                    with col3:
-                        if stats.get('date_range'):
-                            st.write(f"**Zeitraum:** {stats['date_range']['first_date']} bis {stats['date_range']['last_date']}")
-                        
-                        if stats.get('data_quality'):
-                            quality = stats['data_quality']
-                            completion = round((quality['with_start_time'] / max(quality['total'], 1)) * 100, 1)
-                            st.metric("Datenqualität", f"{completion}%")
-                    
-                    st.json(stats)
-                else:
-                    st.error(f"Fehler bei Statistiken: {stats['error']}")
-        
-        # Datenvorschau
-        with st.expander("👀 Datenvorschau"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                limit = st.number_input("Anzahl Einträge", min_value=1, max_value=1000, value=10)
-            
-            with col2:
-                if st.button("Daten laden"):
-                    df = db_manager.get_time_entries(limit=limit)
-                    
-                    if not df.empty:
-                        st.success(f"✅ {len(df)} Einträge geladen")
-                        st.dataframe(df, use_container_width=True)
-                    else:
-                        st.warning("Keine Daten gefunden")
-        
-    except Exception as e:
-        st.error(f"❌ Fehler bei Datenbankdiagnostik: {str(e)}")
-        logger.error(f"Diagnostik-Fehler: {e}")
-
+# Anwendung starten
 if __name__ == "__main__":
-    st.set_page_config(page_title="Datenbankdiagnostik", layout="wide")
-    show_database_diagnostics()
+    app = TimeMotoApp()
+    app.run()
