@@ -747,6 +747,21 @@ class TimeMotoAnalytics:
         
         return insights
 
+def safe_plotly_chart(fig, title="Chart", fallback_data=None):
+    """Sichere Plotly-Chart Anzeige mit Fehlerbehandlung"""
+    try:
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+            return True
+        else:
+            st.warning(f"⚠️ {title}: Keine Daten verfügbar")
+            return False
+    except Exception as e:
+        st.error(f"❌ Fehler bei {title}: {str(e)}")
+        if fallback_data is not None:
+            st.dataframe(fallback_data, use_container_width=True)
+        return False
+
 class TimeMotoApp:
     """Hauptanwendungsklasse mit robusten DB-Features und Analytics"""
     
@@ -865,22 +880,26 @@ class TimeMotoApp:
             st.warning("⚠️ Keine Datenbank-Statistiken verfügbar.")
     
     def show_dashboard_charts(self):
-        """Zeigt Dashboard-Visualisierungen"""
+        """Zeigt Dashboard-Visualisierungen mit robuster Fehlerbehandlung"""
         try:
             # Lade aktuelle Daten für Visualisierungen
             df = self.db_manager.get_time_entries(limit=1000)
             
-            if not df.empty:
-                # Erstelle Analytics-Objekt
-                analytics = TimeMotoAnalytics(df)
-                
-                # Visualisierungen
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Arbeitszeit pro Tag
+            if df.empty:
+                st.info("📊 Keine Daten für Visualisierungen verfügbar")
+                return
+            
+            # Erstelle Analytics-Objekt
+            analytics = TimeMotoAnalytics(df)
+            
+            # Visualisierungen
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Arbeitszeit pro Tag
+                try:
                     daily_data = analytics.get_daily_analysis()
-                    if not daily_data.empty:
+                    if not daily_data.empty and 'Gesamt_Arbeitszeit_Std' in daily_data.columns:
                         fig = px.bar(
                             daily_data, 
                             x='Datum', 
@@ -889,11 +908,17 @@ class TimeMotoApp:
                             labels={'Gesamt_Arbeitszeit_Std': 'Stunden'}
                         )
                         fig.update_layout(height=400)
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                with col2:
-                    # Saldo pro Tag
-                    if not daily_data.empty:
+                        safe_plotly_chart(fig, "Tägliche Arbeitszeit", daily_data[['Datum', 'Gesamt_Arbeitszeit_Std']])
+                    else:
+                        st.info("Keine täglichen Arbeitszeitdaten verfügbar")
+                except Exception as e:
+                    st.error(f"Fehler bei täglicher Arbeitszeit: {str(e)}")
+            
+            with col2:
+                # Saldo pro Tag
+                try:
+                    daily_data = analytics.get_daily_analysis()
+                    if not daily_data.empty and 'Gesamt_Saldo_Std' in daily_data.columns:
                         fig = px.line(
                             daily_data, 
                             x='Datum', 
@@ -903,38 +928,63 @@ class TimeMotoApp:
                         )
                         fig.add_hline(y=0, line_dash="dash", line_color="gray")
                         fig.update_layout(height=400)
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                # Arbeitszeitmuster
-                st.subheader("🔍 Arbeitszeitmuster")
-                time_patterns = analytics.df['time_type'].value_counts()
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    fig = px.pie(
-                        values=time_patterns.values,
-                        names=time_patterns.index,
-                        title="Verteilung der Arbeitszeitttypen"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                with col2:
-                    # Top Mitarbeiter nach Arbeitszeit
-                    employee_summary = analytics.get_employee_summary()
-                    top_employees = employee_summary.nlargest(10, 'Arbeitszeit_Stunden')
+                        safe_plotly_chart(fig, "Täglicher Saldo", daily_data[['Datum', 'Gesamt_Saldo_Std']])
+                    else:
+                        st.info("Keine täglichen Saldodaten verfügbar")
+                except Exception as e:
+                    st.error(f"Fehler bei täglichem Saldo: {str(e)}")
+            
+            # Arbeitszeitmuster
+            st.subheader("🔍 Arbeitszeitmuster")
+            
+            try:
+                if 'time_type' in analytics.df.columns:
+                    time_patterns = analytics.df['time_type'].value_counts()
                     
-                    fig = px.bar(
-                        top_employees,
-                        x='Arbeitszeit_Stunden',
-                        y='Mitarbeiter',
-                        orientation='h',
-                        title="🏆 Top 10 Mitarbeiter (Arbeitszeit)"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                    if not time_patterns.empty:
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            try:
+                                fig = px.pie(
+                                    values=time_patterns.values,
+                                    names=time_patterns.index,
+                                    title="Verteilung der Arbeitszeitttypen"
+                                )
+                                safe_plotly_chart(fig, "Arbeitszeitmuster")
+                            except Exception as e:
+                                st.error(f"Fehler bei Kreisdiagramm: {str(e)}")
+                                st.dataframe(time_patterns.reset_index(), use_container_width=True)
+                        
+                        with col2:
+                            # Top Mitarbeiter nach Arbeitszeit
+                            try:
+                                employee_summary = analytics.get_employee_summary()
+                                if not employee_summary.empty:
+                                    top_employees = employee_summary.nlargest(10, 'Arbeitszeit_Stunden')
+                                    
+                                    fig = px.bar(
+                                        top_employees,
+                                        x='Arbeitszeit_Stunden',
+                                        y='Mitarbeiter',
+                                        orientation='h',
+                                        title="🏆 Top 10 Mitarbeiter (Arbeitszeit)"
+                                    )
+                                    safe_plotly_chart(fig, "Top Mitarbeiter", top_employees[['Mitarbeiter', 'Arbeitszeit_Stunden']])
+                                else:
+                                    st.info("Keine Mitarbeiterdaten für Ranking verfügbar")
+                            except Exception as e:
+                                st.error(f"Fehler bei Mitarbeiter-Ranking: {str(e)}")
+                    else:
+                        st.info("Keine Arbeitszeitmuster-Daten verfügbar")
+                else:
+                    st.info("Arbeitszeitmuster-Spalte nicht gefunden")
+            except Exception as e:
+                st.error(f"Fehler bei Arbeitszeitmuster: {str(e)}")
         
         except Exception as e:
             st.error(f"❌ Fehler beim Laden der Dashboard-Daten: {str(e)}")
+            logger.error(f"Dashboard-Chart Fehler: {e}")
     
     def show_import_page(self):
         """Zeigt die Import-Seite"""
@@ -1045,7 +1095,8 @@ class TimeMotoApp:
         analytics = TimeMotoAnalytics(df)
         
         # Filter
-        employees = ['Alle'] + list(analytics.df['username' if 'username' in analytics.df.columns else 'Username'].unique())
+        username_col = 'username' if 'username' in analytics.df.columns else 'Username'
+        employees = ['Alle'] + list(analytics.df[username_col].unique())
         selected_employee = st.selectbox("👤 Mitarbeiter auswählen:", employees)
         
         if selected_employee == 'Alle':
@@ -1063,36 +1114,43 @@ class TimeMotoApp:
             
             with col1:
                 # Saldo-Vergleich
-                fig = px.bar(
-                    summary, 
-                    x='Mitarbeiter', 
-                    y='Saldo_Stunden',
-                    title="⚖️ Saldo-Vergleich alle Mitarbeiter",
-                    color='Saldo_Stunden',
-                    color_continuous_scale='RdYlGn'
-                )
-                fig.update_xaxis(tickangle=45)
-                st.plotly_chart(fig, use_container_width=True)
+                try:
+                    fig = px.bar(
+                        summary, 
+                        x='Mitarbeiter', 
+                        y='Saldo_Stunden',
+                        title="⚖️ Saldo-Vergleich alle Mitarbeiter",
+                        color='Saldo_Stunden',
+                        color_continuous_scale='RdYlGn'
+                    )
+                    fig.update_layout(xaxis_tickangle=45)
+                    safe_plotly_chart(fig, "Saldo-Vergleich", summary[['Mitarbeiter', 'Saldo_Stunden']])
+                except Exception as e:
+                    st.error(f"Fehler bei Saldo-Vergleich Visualisierung: {str(e)}")
+                    st.dataframe(summary[['Mitarbeiter', 'Saldo_Stunden']], use_container_width=True)
             
             with col2:
                 # Arbeitszeit vs Saldo
-                fig = px.scatter(
-                    summary,
-                    x='Arbeitszeit_Stunden',
-                    y='Saldo_Stunden',
-                    size='Arbeitstage',
-                    hover_name='Mitarbeiter',
-                    title="💼 Arbeitszeit vs. Saldo",
-                    labels={
-                        'Arbeitszeit_Stunden': 'Arbeitszeit (Stunden)',
-                        'Saldo_Stunden': 'Saldo (Stunden)'
-                    }
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                try:
+                    fig = px.scatter(
+                        summary,
+                        x='Arbeitszeit_Stunden',
+                        y='Saldo_Stunden',
+                        size='Arbeitstage',
+                        hover_name='Mitarbeiter',
+                        title="💼 Arbeitszeit vs. Saldo",
+                        labels={
+                            'Arbeitszeit_Stunden': 'Arbeitszeit (Stunden)',
+                            'Saldo_Stunden': 'Saldo (Stunden)'
+                        }
+                    )
+                    safe_plotly_chart(fig, "Arbeitszeit vs Saldo", summary[['Mitarbeiter', 'Arbeitszeit_Stunden', 'Saldo_Stunden']])
+                except Exception as e:
+                    st.error(f"Fehler bei Scatter-Plot: {str(e)}")
+                    st.dataframe(summary[['Mitarbeiter', 'Arbeitszeit_Stunden', 'Saldo_Stunden']], use_container_width=True)
         
         else:
             # Einzelner Mitarbeiter
-            username_col = 'username' if 'username' in analytics.df.columns else 'Username'
             employee_data = analytics.df[analytics.df[username_col] == selected_employee]
             
             # Metriken für den Mitarbeiter
@@ -1120,41 +1178,52 @@ class TimeMotoApp:
             
             with col1:
                 # Täglicher Saldo
-                daily_balance = employee_data.groupby('parsed_date')['balance_minutes'].sum() / 60
-                
-                fig = px.bar(
-                    x=daily_balance.index,
-                    y=daily_balance.values,
-                    title=f"📊 Täglicher Saldo - {selected_employee}",
-                    labels={'x': 'Datum', 'y': 'Saldo (Stunden)'}
-                )
-                fig.add_hline(y=0, line_dash="dash", line_color="gray")
-                st.plotly_chart(fig, use_container_width=True)
+                try:
+                    daily_balance = employee_data.groupby('parsed_date')['balance_minutes'].sum() / 60
+                    
+                    fig = px.bar(
+                        x=daily_balance.index,
+                        y=daily_balance.values,
+                        title=f"📊 Täglicher Saldo - {selected_employee}",
+                        labels={'x': 'Datum', 'y': 'Saldo (Stunden)'}
+                    )
+                    fig.add_hline(y=0, line_dash="dash", line_color="gray")
+                    safe_plotly_chart(fig, "Täglicher Saldo")
+                except Exception as e:
+                    st.error(f"Fehler bei täglichem Saldo: {str(e)}")
             
             with col2:
                 # Arbeitszeitmuster
-                time_patterns = employee_data['time_type'].value_counts()
-                
-                fig = px.pie(
-                    values=time_patterns.values,
-                    names=time_patterns.index,
-                    title=f"🔍 Arbeitszeitmuster - {selected_employee}"
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                try:
+                    time_patterns = employee_data['time_type'].value_counts()
+                    
+                    fig = px.pie(
+                        values=time_patterns.values,
+                        names=time_patterns.index,
+                        title=f"🔍 Arbeitszeitmuster - {selected_employee}"
+                    )
+                    safe_plotly_chart(fig, "Arbeitszeitmuster")
+                except Exception as e:
+                    st.error(f"Fehler bei Arbeitszeitmuster: {str(e)}")
             
             # Detailtabelle
             st.subheader("📋 Detaildaten")
-            display_cols = ['parsed_date', 'start_time', 'end_time', 'duration_excluding_breaks', 'balance', 'work_code', 'absence_name', 'time_type']
-            available_cols = [col for col in display_cols if col in employee_data.columns]
             
-            if 'start_time' not in employee_data.columns:
-                # Fallback für ursprüngliche Spaltennamen
-                display_data = employee_data[['parsed_date', 'StartTime', 'EndTime', 'DurationExcludingBreaks', 'Balance', 'work_code', 'AbsenceName', 'time_type']].copy()
-                display_data.columns = ['Datum', 'Start', 'Ende', 'Arbeitszeit', 'Saldo', 'Projekt', 'Abwesenheit', 'Typ']
-            else:
-                display_data = employee_data[available_cols].copy()
-            
-            st.dataframe(display_data, use_container_width=True)
+            try:
+                display_cols = ['parsed_date', 'start_time', 'end_time', 'duration_excluding_breaks', 'balance', 'work_code', 'absence_name', 'time_type']
+                available_cols = [col for col in display_cols if col in employee_data.columns]
+                
+                if 'start_time' not in employee_data.columns:
+                    # Fallback für ursprüngliche Spaltennamen
+                    display_data = employee_data[['parsed_date', 'StartTime', 'EndTime', 'DurationExcludingBreaks', 'Balance', 'work_code', 'AbsenceName', 'time_type']].copy()
+                    display_data.columns = ['Datum', 'Start', 'Ende', 'Arbeitszeit', 'Saldo', 'Projekt', 'Abwesenheit', 'Typ']
+                else:
+                    display_data = employee_data[available_cols].copy()
+                
+                st.dataframe(display_data, use_container_width=True)
+            except Exception as e:
+                st.error(f"Fehler bei Detailtabelle: {str(e)}")
+                st.dataframe(employee_data.head(), use_container_width=True)
     
     def show_date_analysis(self):
         """Datums-basierte Analyse"""
@@ -1183,61 +1252,83 @@ class TimeMotoApp:
         
         with col1:
             # Mitarbeiteranzahl pro Tag
-            fig = px.bar(
-                daily_data,
-                x='Datum',
-                y='Mitarbeiter_Anzahl',
-                title="👥 Anwesende Mitarbeiter pro Tag"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = px.bar(
+                    daily_data,
+                    x='Datum',
+                    y='Mitarbeiter_Anzahl',
+                    title="👥 Anwesende Mitarbeiter pro Tag"
+                )
+                safe_plotly_chart(fig, "Mitarbeiter pro Tag", daily_data[['Datum', 'Mitarbeiter_Anzahl']])
+            except Exception as e:
+                st.error(f"Fehler bei Mitarbeiter-Chart: {str(e)}")
+                st.dataframe(daily_data[['Datum', 'Mitarbeiter_Anzahl']], use_container_width=True)
         
         with col2:
             # Abwesenheiten pro Tag
-            fig = px.bar(
-                daily_data,
-                x='Datum',
-                y='Abwesenheiten',
-                title="🏥 Abwesenheiten pro Tag",
-                color='Abwesenheiten',
-                color_continuous_scale='Reds'
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = px.bar(
+                    daily_data,
+                    x='Datum',
+                    y='Abwesenheiten',
+                    title="🏥 Abwesenheiten pro Tag",
+                    color='Abwesenheiten',
+                    color_continuous_scale='Reds'
+                )
+                safe_plotly_chart(fig, "Abwesenheiten pro Tag", daily_data[['Datum', 'Abwesenheiten']])
+            except Exception as e:
+                st.error(f"Fehler bei Abwesenheits-Chart: {str(e)}")
+                st.dataframe(daily_data[['Datum', 'Abwesenheiten']], use_container_width=True)
         
         # Wochentagsanalyse
-        analytics.df['weekday_num'] = analytics.df['parsed_date'].dt.dayofweek
-        weekday_data = analytics.df.groupby(['weekday', 'weekday_num']).agg({
-            'username' if 'username' in analytics.df.columns else 'Username': 'nunique',
-            'balance_minutes': 'sum',
-            'duration_minutes': 'sum'
-        }).reset_index().sort_values('weekday_num')
-        
-        weekday_data['balance_hours'] = weekday_data['balance_minutes'] / 60
-        weekday_data['duration_hours'] = weekday_data['duration_minutes'] / 60
-        
-        st.subheader("📊 Wochentagsanalyse")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig = px.bar(
-                weekday_data,
-                x='weekday',
-                y='duration_hours',
-                title="⏰ Durchschnittliche Arbeitszeit pro Wochentag"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            fig = px.bar(
-                weekday_data,
-                x='weekday',
-                y='balance_hours',
-                title="⚖️ Durchschnittlicher Saldo pro Wochentag",
-                color='balance_hours',
-                color_continuous_scale='RdYlGn'
-            )
-            fig.add_hline(y=0, line_dash="dash", line_color="gray")
-            st.plotly_chart(fig, use_container_width=True)
+        try:
+            analytics.df['weekday_num'] = analytics.df['parsed_date'].dt.dayofweek
+            username_col = 'username' if 'username' in analytics.df.columns else 'Username'
+            
+            weekday_data = analytics.df.groupby(['weekday', 'weekday_num']).agg({
+                username_col: 'nunique',
+                'balance_minutes': 'sum',
+                'duration_minutes': 'sum'
+            }).reset_index().sort_values('weekday_num')
+            
+            weekday_data['balance_hours'] = weekday_data['balance_minutes'] / 60
+            weekday_data['duration_hours'] = weekday_data['duration_minutes'] / 60
+            
+            st.subheader("📊 Wochentagsanalyse")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                try:
+                    fig = px.bar(
+                        weekday_data,
+                        x='weekday',
+                        y='duration_hours',
+                        title="⏰ Durchschnittliche Arbeitszeit pro Wochentag"
+                    )
+                    safe_plotly_chart(fig, "Wochentag Arbeitszeit", weekday_data[['weekday', 'duration_hours']])
+                except Exception as e:
+                    st.error(f"Fehler bei Wochentag-Arbeitszeit: {str(e)}")
+                    st.dataframe(weekday_data[['weekday', 'duration_hours']], use_container_width=True)
+            
+            with col2:
+                try:
+                    fig = px.bar(
+                        weekday_data,
+                        x='weekday',
+                        y='balance_hours',
+                        title="⚖️ Durchschnittlicher Saldo pro Wochentag",
+                        color='balance_hours',
+                        color_continuous_scale='RdYlGn'
+                    )
+                    fig.add_hline(y=0, line_dash="dash", line_color="gray")
+                    safe_plotly_chart(fig, "Wochentag Saldo", weekday_data[['weekday', 'balance_hours']])
+                except Exception as e:
+                    st.error(f"Fehler bei Wochentag-Saldo: {str(e)}")
+                    st.dataframe(weekday_data[['weekday', 'balance_hours']], use_container_width=True)
+                    
+        except Exception as e:
+            st.error(f"Fehler bei Wochentagsanalyse: {str(e)}")
         
         # Detailtabelle
         st.subheader("📋 Tägliche Übersicht")
@@ -1292,23 +1383,31 @@ class TimeMotoApp:
         
         with col1:
             # Projektverteilung nach Zeit
-            fig = px.pie(
-                project_summary,
-                values='Arbeitszeit_Stunden',
-                names='Projekt',
-                title="⏰ Zeitverteilung nach Projekten"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = px.pie(
+                    project_summary,
+                    values='Arbeitszeit_Stunden',
+                    names='Projekt',
+                    title="⏰ Zeitverteilung nach Projekten"
+                )
+                safe_plotly_chart(fig, "Projektverteilung", project_summary[['Projekt', 'Arbeitszeit_Stunden']])
+            except Exception as e:
+                st.error(f"Fehler bei Projektverteilung: {str(e)}")
+                st.dataframe(project_summary[['Projekt', 'Arbeitszeit_Stunden']], use_container_width=True)
         
         with col2:
             # Mitarbeiter pro Projekt
-            fig = px.bar(
-                project_summary,
-                x='Projekt',
-                y='Mitarbeiter',
-                title="👥 Mitarbeiter pro Projekt"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = px.bar(
+                    project_summary,
+                    x='Projekt',
+                    y='Mitarbeiter',
+                    title="👥 Mitarbeiter pro Projekt"
+                )
+                safe_plotly_chart(fig, "Mitarbeiter pro Projekt", project_summary[['Projekt', 'Mitarbeiter']])
+            except Exception as e:
+                st.error(f"Fehler bei Mitarbeiter-Projekt-Chart: {str(e)}")
+                st.dataframe(project_summary[['Projekt', 'Mitarbeiter']], use_container_width=True)
         
         # Detailanalyse
         st.subheader("📊 Projekt-Details")
@@ -1327,14 +1426,18 @@ class TimeMotoApp:
             project_details = work_analysis[work_analysis['Projekt'] == selected_project]
             
             # Mitarbeiterverteilung im Projekt
-            fig = px.bar(
-                project_details,
-                x='Mitarbeiter',
-                y='Arbeitszeit_Stunden',
-                title=f"👥 Mitarbeiterzeiten - {selected_project}"
-            )
-            fig.update_xaxis(tickangle=45)
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = px.bar(
+                    project_details,
+                    x='Mitarbeiter',
+                    y='Arbeitszeit_Stunden',
+                    title=f"👥 Mitarbeiterzeiten - {selected_project}"
+                )
+                fig.update_layout(xaxis_tickangle=45)
+                safe_plotly_chart(fig, f"Projekt {selected_project}", project_details[['Mitarbeiter', 'Arbeitszeit_Stunden']])
+            except Exception as e:
+                st.error(f"Fehler bei Projekt-Visualisierung: {str(e)}")
+                st.dataframe(project_details[['Mitarbeiter', 'Arbeitszeit_Stunden']], use_container_width=True)
             
             st.dataframe(
                 project_details[['Mitarbeiter', 'Tage', 'Arbeitszeit_Stunden']],
@@ -1392,41 +1495,54 @@ class TimeMotoApp:
         
         with col1:
             # Abwesenheitstypen
-            fig = px.pie(
-                absence_summary,
-                values='Tage',
-                names='Abwesenheitstyp',
-                title="📊 Verteilung der Abwesenheitstypen"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = px.pie(
+                    absence_summary,
+                    values='Tage',
+                    names='Abwesenheitstyp',
+                    title="📊 Verteilung der Abwesenheitstypen"
+                )
+                safe_plotly_chart(fig, "Abwesenheitstypen", absence_summary)
+            except Exception as e:
+                st.error(f"Fehler bei Abwesenheitstypen: {str(e)}")
+                st.dataframe(absence_summary, use_container_width=True)
         
         with col2:
             # Mitarbeiter mit meisten Abwesenheiten
-            employee_absences = absence_data.groupby(username_col)['parsed_date'].count().reset_index()
-            employee_absences.columns = ['Mitarbeiter', 'Tage']
-            top_absences = employee_absences.nlargest(10, 'Tage')
-            
-            if not top_absences.empty:
-                fig = px.bar(
-                    top_absences,
-                    x='Tage',
-                    y='Mitarbeiter',
-                    orientation='h',
-                    title="👥 Mitarbeiter mit meisten Abwesenheitstagen"
-                )
-                st.plotly_chart(fig, use_container_width=True)
+            try:
+                employee_absences = absence_data.groupby(username_col)['parsed_date'].count().reset_index()
+                employee_absences.columns = ['Mitarbeiter', 'Tage']
+                top_absences = employee_absences.nlargest(10, 'Tage')
+                
+                if not top_absences.empty:
+                    fig = px.bar(
+                        top_absences,
+                        x='Tage',
+                        y='Mitarbeiter',
+                        orientation='h',
+                        title="👥 Mitarbeiter mit meisten Abwesenheitstagen"
+                    )
+                    safe_plotly_chart(fig, "Top Abwesenheiten", top_absences)
+                else:
+                    st.info("Keine Abwesenheitsdaten für Ranking")
+            except Exception as e:
+                st.error(f"Fehler bei Abwesenheits-Ranking: {str(e)}")
         
         # Detailanalyse
         st.subheader("📋 Abwesenheits-Details")
-        st.dataframe(
-            absence_data[[username_col, 'parsed_date', absence_col, 'remarks' if 'remarks' in absence_data.columns else 'Remarks']].rename(columns={
+        
+        try:
+            remarks_col = 'remarks' if 'remarks' in absence_data.columns else 'Remarks'
+            display_data = absence_data[[username_col, 'parsed_date', absence_col, remarks_col]].rename(columns={
                 username_col: 'Mitarbeiter',
                 'parsed_date': 'Datum',
                 absence_col: 'Abwesenheitstyp',
-                'remarks' if 'remarks' in absence_data.columns else 'Remarks': 'Bemerkungen'
-            }),
-            use_container_width=True
-        )
+                remarks_col: 'Bemerkungen'
+            })
+            st.dataframe(display_data, use_container_width=True)
+        except Exception as e:
+            st.error(f"Fehler bei Abwesenheits-Details: {str(e)}")
+            st.dataframe(absence_data.head(), use_container_width=True)
     
     def show_insights(self):
         """KPIs und automatische Insights"""
@@ -1498,25 +1614,28 @@ class TimeMotoApp:
         
         # Export aller Insights
         if st.button("📥 Insights-Report exportieren"):
-            report_data = {
-                'Zeitraum': f"{analytics.df['parsed_date'].min()} bis {analytics.df['parsed_date'].max()}",
-                'Mitarbeiter_Gesamt': total_employees,
-                'Durchschnittliche_Arbeitstage': round(total_workdays, 1),
-                'Durchschnittliche_Tagesarbeitszeit': round(avg_daily_hours, 1),
-                'Überstunden_Quote_Prozent': round(overtime_ratio, 1),
-                'Abwesenheits_Quote_Prozent': round(absence_rate, 1),
-                **insights
-            }
-            
-            import json
-            report_json = json.dumps(report_data, indent=2, ensure_ascii=False, default=str)
-            
-            st.download_button(
-                label="💾 JSON-Report herunterladen",
-                data=report_json,
-                file_name=f"timemoto_insights_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json"
-            )
+            try:
+                report_data = {
+                    'Zeitraum': f"{analytics.df['parsed_date'].min()} bis {analytics.df['parsed_date'].max()}",
+                    'Mitarbeiter_Gesamt': total_employees,
+                    'Durchschnittliche_Arbeitstage': round(total_workdays, 1),
+                    'Durchschnittliche_Tagesarbeitszeit': round(avg_daily_hours, 1),
+                    'Überstunden_Quote_Prozent': round(overtime_ratio, 1),
+                    'Abwesenheits_Quote_Prozent': round(absence_rate, 1),
+                    **insights
+                }
+                
+                import json
+                report_json = json.dumps(report_data, indent=2, ensure_ascii=False, default=str)
+                
+                st.download_button(
+                    label="💾 JSON-Report herunterladen",
+                    data=report_json,
+                    file_name=f"timemoto_insights_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
+                )
+            except Exception as e:
+                st.error(f"Fehler beim Erstellen des Reports: {str(e)}")
     
     def show_data_view(self):
         """Zeigt die Datenansicht"""
@@ -1563,13 +1682,16 @@ class TimeMotoApp:
             
             # Export-Option
             if st.button("📥 Als CSV exportieren"):
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    label="💾 CSV herunterladen",
-                    data=csv,
-                    file_name=f"zeiterfassung_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
+                try:
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="💾 CSV herunterladen",
+                        data=csv,
+                        file_name=f"zeiterfassung_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                except Exception as e:
+                    st.error(f"Fehler beim CSV-Export: {str(e)}")
         else:
             st.info("📭 Keine Daten gefunden. Importieren Sie zuerst TimeMoto Daten.")
     
