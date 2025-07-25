@@ -18,7 +18,6 @@ import json
 from dataclasses import dataclass, asdict
 from enum import Enum
 import calendar
-from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -158,8 +157,34 @@ class TeamMetrics:
     team_efficiency: float
     workload_distribution: float
 
-class AdvancedDatabaseManager(RobustDatabaseManager):
+class AdvancedDatabaseManager:
     """Erweiterte Datenbankfunktionen"""
+    
+    def __init__(self):
+        self.db_manager = RobustDatabaseManager()
+        self.connection_string = self.db_manager.connection_string
+        self.max_retries = self.db_manager.max_retries
+        self.retry_delay = self.db_manager.retry_delay
+    
+    def get_connection(self):
+        """Nutzt die Verbindung vom RobustDatabaseManager"""
+        return self.db_manager.get_connection()
+    
+    def ensure_tables(self):
+        """Nutzt ensure_tables vom RobustDatabaseManager"""
+        return self.db_manager.ensure_tables()
+    
+    def test_connection(self):
+        """Nutzt test_connection vom RobustDatabaseManager"""
+        return self.db_manager.test_connection()
+    
+    def get_statistics(self):
+        """Nutzt get_statistics vom RobustDatabaseManager"""
+        return self.db_manager.get_statistics()
+    
+    def get_time_entries(self, limit: int = 100, offset: int = 0):
+        """Nutzt get_time_entries vom RobustDatabaseManager"""
+        return self.db_manager.get_time_entries(limit, offset)
     
     def get_employee_metrics(self, start_date: Optional[date] = None, end_date: Optional[date] = None) -> pd.DataFrame:
         """Holt erweiterte Mitarbeiter-Metriken"""
@@ -249,8 +274,20 @@ class AdvancedDatabaseManager(RobustDatabaseManager):
         finally:
             conn.close()
 
-class EnhancedTimeMotoAnalytics(TimeMotoAnalytics):
+class EnhancedTimeMotoAnalytics:
     """Erweiterte Analytics-Klasse"""
+    
+    def __init__(self, df: pd.DataFrame):
+        self.base_analytics = TimeMotoAnalytics(df)
+        self.df = self.base_analytics.df
+    
+    def get_employee_summary(self):
+        """Nutzt get_employee_summary von TimeMotoAnalytics"""
+        return self.base_analytics.get_employee_summary()
+    
+    def get_daily_analysis(self):
+        """Nutzt get_daily_analysis von TimeMotoAnalytics"""
+        return self.base_analytics.get_daily_analysis()
     
     def calculate_overtime(self, standard_hours: float = 8.0) -> pd.DataFrame:
         """Berechnet Überstunden pro Mitarbeiter"""
@@ -572,12 +609,282 @@ class ReportGenerator:
         
         return report
 
-class EnhancedTimeMotoApp(TimeMotoApp):
+class EnhancedTimeMotoApp:
     """Erweiterte Hauptanwendungsklasse"""
     
     def __init__(self):
         self.db_manager = AdvancedDatabaseManager()
         self.viz_manager = AdvancedVisualizationManager()
+        # Basis-App-Funktionen
+        self.base_app = TimeMotoApp()
+    
+    def show_robust_import(self):
+        """Zeigt die robuste Import-Seite"""
+        st.header("📤 Robuster Datenimport mit Duplikatskontrolle")
+        
+        # Datenbankverbindung testen
+        success, message = self.db_manager.test_connection()
+        if not success:
+            st.error(message)
+            return
+        
+        # Tabellen sicherstellen
+        if not self.db_manager.ensure_tables():
+            st.error("❌ Datenbankschema konnte nicht erstellt werden")
+            return
+        
+        # Import-Manager initialisieren
+        import_manager = ImportManager(self.db_manager.db_manager)
+        
+        # Import-Strategie wählen
+        st.subheader("🎯 Import-Strategie")
+        
+        strategy = st.radio(
+            "Wie sollen Duplikate behandelt werden?",
+            [
+                ("skip_duplicates", "🚫 Duplikate überspringen (Standard)"),
+                ("update_duplicates", "🔄 Duplikate aktualisieren"),
+                ("error_on_duplicates", "❌ Bei Duplikaten Fehler anzeigen")
+            ],
+            format_func=lambda x: x[1],
+            index=0
+        )
+        
+        strategy_value = strategy[0]
+        
+        # Strategie-Erklärung
+        strategy_descriptions = {
+            "skip_duplicates": "Bereits vorhandene Einträge werden übersprungen. Sicherste Option.",
+            "update_duplicates": "Bereits vorhandene Einträge werden mit neuen Daten überschrieben.",
+            "error_on_duplicates": "Import wird abgebrochen wenn Duplikate gefunden werden."
+        }
+        
+        st.info(f"💡 **{strategy_descriptions[strategy_value]}**")
+        
+        # Datei-Upload
+        st.subheader("📁 Datei hochladen")
+        
+        uploaded_file = st.file_uploader(
+            "TimeMoto Export-Datei auswählen",
+            type=['xlsx', 'xls', 'csv'],
+            help="Unterstützte Formate: Excel (.xlsx, .xls) und CSV (.csv)"
+        )
+        
+        if uploaded_file is not None:
+            
+            # Datei-Informationen anzeigen
+            file_info = {
+                'name': uploaded_file.name,
+                'size': len(uploaded_file.getvalue()),
+                'type': uploaded_file.type
+            }
+            
+            st.markdown(f"""
+            <div class="import-status">
+                <h4>📋 Datei-Informationen</h4>
+                <ul>
+                    <li><strong>Name:</strong> {file_info['name']}</li>
+                    <li><strong>Größe:</strong> {file_info['size']:,} Bytes</li>
+                    <li><strong>Typ:</strong> {file_info['type']}</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            try:
+                # Datei laden
+                if uploaded_file.name.endswith(('.xlsx', '.xls')):
+                    df = pd.read_excel(uploaded_file)
+                else:
+                    df = pd.read_csv(uploaded_file)
+                
+                st.success(f"✅ Datei erfolgreich geladen: {len(df)} Zeilen gefunden")
+                
+                # Datenvorschau
+                with st.expander("👀 Datenvorschau", expanded=False):
+                    st.dataframe(df.head(10), use_container_width=True)
+                
+                # Import starten
+                if st.button("🚀 **ROBUSTEN IMPORT STARTEN**", type="primary", use_container_width=True):
+                    
+                    # Import durchführen
+                    with st.spinner("🔄 Führe robusten Import durch..."):
+                        result = import_manager.validate_and_import(df, strategy_value)
+                    
+                    # Ergebnisse anzeigen
+                    if result['success']:
+                        st.markdown(f"""
+                        <div class="success-message">
+                            <h4>🎉 Import erfolgreich abgeschlossen!</h4>
+                            <ul>
+                                <li><strong>Session ID:</strong> {result['session_id']}</li>
+                                <li><strong>Verarbeitete Zeilen:</strong> {result['processed_rows']} von {result['total_rows']}</li>
+                                <li><strong>Neue Einträge:</strong> {result['inserted_rows']}</li>
+                                <li><strong>Aktualisierte Einträge:</strong> {result['updated_rows']}</li>
+                                <li><strong>Übersprungene Einträge:</strong> {result['skipped_rows']}</li>
+                                <li><strong>Fehlerhafte Zeilen:</strong> {result['error_rows']}</li>
+                                <li><strong>Gefundene Duplikate:</strong> {result['duplicates_found']}</li>
+                            </ul>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        st.balloons()
+                        
+                    else:
+                        st.markdown("""
+                        <div class="error-message">
+                            <h4>❌ Import fehlgeschlagen</h4>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    # Fehler anzeigen
+                    if result.get('errors'):
+                        with st.expander(f"❌ {len(result['errors'])} Fehler aufgetreten"):
+                            for error in result['errors']:
+                                st.error(error)
+                                
+            except Exception as e:
+                st.error(f"❌ Fehler beim Laden der Datei: {str(e)}")
+        
+        # Import-Historie anzeigen
+        st.subheader("📊 Import-Historie")
+        
+        if st.button("🔄 Historie laden"):
+            history_df = import_manager.get_import_history()
+            
+            if not history_df.empty:
+                st.dataframe(
+                    history_df,
+                    use_container_width=True,
+                    column_config={
+                        "timestamp": st.column_config.DatetimeColumn("Zeitstempel"),
+                        "session_id": st.column_config.TextColumn("Session ID"),
+                        "total_rows": st.column_config.NumberColumn("Gesamt"),
+                        "inserted_rows": st.column_config.NumberColumn("Eingefügt"),
+                        "updated_rows": st.column_config.NumberColumn("Aktualisiert"),
+                        "skipped_rows": st.column_config.NumberColumn("Übersprungen"),
+                        "error_rows": st.column_config.NumberColumn("Fehler")
+                    }
+                )
+            else:
+                st.info("Noch keine Import-Historie vorhanden.")
+    
+    def show_data_view(self):
+        """Datenansicht"""
+        st.header("📋 Zeiterfassungsdaten")
+        
+        # Filter-Optionen
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            limit = st.selectbox("📊 Anzahl Einträge:", [50, 100, 200, 500, 1000], index=1)
+        
+        with col2:
+            if st.button("🔄 Daten aktualisieren"):
+                st.rerun()
+        
+        # Daten laden
+        df = self.db_manager.get_time_entries(limit)
+        
+        if not df.empty:
+            st.info(f"📈 {len(df)} Einträge gefunden")
+            
+            st.dataframe(
+                df,
+                use_container_width=True,
+                column_config={
+                    "entry_date": st.column_config.DateColumn("Datum"),
+                    "username": st.column_config.TextColumn("Mitarbeiter"),
+                    "start_time": st.column_config.TextColumn("Start"),
+                    "end_time": st.column_config.TextColumn("Ende"),
+                    "total_duration": st.column_config.TextColumn("Dauer"),
+                    "balance": st.column_config.TextColumn("Saldo"),
+                    "absence_name": st.column_config.TextColumn("Abwesenheit")
+                }
+            )
+            
+            # Export-Option
+            if st.button("📥 Als CSV exportieren"):
+                try:
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="💾 CSV herunterladen",
+                        data=csv,
+                        file_name=f"zeiterfassung_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                except Exception as e:
+                    st.error(f"Fehler beim CSV-Export: {str(e)}")
+        else:
+            st.info("📭 Keine Daten gefunden. Importieren Sie zuerst TimeMoto Daten.")
+    
+    def show_settings(self):
+        """Einstellungen"""
+        st.header("⚙️ Einstellungen")
+        
+        # Datenbankstatus
+        st.subheader("🗄️ Datenbankverbindung")
+        
+        success, message = self.db_manager.test_connection()
+        
+        if success:
+            st.success(message)
+            
+            # Statistiken anzeigen
+            stats = self.db_manager.get_statistics()
+            if 'error' not in stats:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.metric("📊 Einträge in DB", stats.get('total_entries', 0))
+                    st.metric("👥 Mitarbeiter", stats.get('total_users', 0))
+                
+                with col2:
+                    st.metric("🏗️ Tabellen", "✅" if stats.get('table_exists') else "❌")
+                    st.metric("🏥 Abwesenheiten", stats.get('total_absences', 0))
+        else:
+            st.error(message)
+        
+        # Diagnose-Tools
+        st.subheader("🔧 Diagnose-Tools")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🏗️ Tabellen neu erstellen"):
+                with st.spinner("Erstelle Tabellen..."):
+                    success = self.db_manager.ensure_tables()
+                
+                if success:
+                    st.success("✅ Tabellen erfolgreich erstellt/aktualisiert")
+                else:
+                    st.error("❌ Fehler beim Erstellen der Tabellen")
+        
+        with col2:
+            if st.button("📊 Statistiken aktualisieren"):
+                st.rerun()
+        
+        # Konfigurationshilfe
+        st.subheader("🔧 Konfiguration")
+        
+        st.markdown("""
+        <div class="analytics-section">
+            <h4>📝 Neon.tech Konfiguration</h4>
+            <p><strong>Für secrets.toml:</strong></p>
+            <pre>
+[secrets]
+DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmode=require"
+            </pre>
+            
+            <p><strong>Für Streamlit Cloud:</strong> Setzen Sie DATABASE_URL in den App-Secrets.</p>
+            
+            <h5>🔍 Wichtige Hinweise:</h5>
+            <ul>
+                <li>Verwenden Sie den Pooler-Endpoint (-pooler in der URL)</li>
+                <li>Entfernen Sie channel_binding=require</li>
+                <li>Nutzen Sie nur sslmode=require</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
     
     def run(self):
         """Startet die erweiterte Streamlit Anwendung"""
