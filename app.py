@@ -120,6 +120,58 @@ st.markdown("""
         color: #718096;
         margin-top: 0.25rem;
     }
+    
+    .import-status {
+        background: #f8f9fa;
+        border-radius: 10px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        border-left: 4px solid #28a745;
+    }
+    
+    .duplicate-warning {
+        background: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+        color: #856404;
+    }
+    
+    .success-message {
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+        color: #155724;
+    }
+    
+    .error-message {
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+        color: #721c24;
+    }
+    
+    .insight-box {
+        background: linear-gradient(45deg, #e3f2fd, #f3e5f5);
+        border-radius: 10px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        border-left: 4px solid #2196f3;
+    }
+    
+    .warning-box {
+        background: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+        color: #856404;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -157,34 +209,289 @@ class TeamMetrics:
     team_efficiency: float
     workload_distribution: float
 
-class AdvancedDatabaseManager:
-    """Erweiterte Datenbankfunktionen"""
+class RobustDatabaseManager:
+    """Robuste Datenbankverbindung ohne problematische SQL-Features"""
     
     def __init__(self):
-        self.db_manager = RobustDatabaseManager()
-        self.connection_string = self.db_manager.connection_string
-        self.max_retries = self.db_manager.max_retries
-        self.retry_delay = self.db_manager.retry_delay
+        self.connection_string = self._get_connection_string()
+        self.max_retries = 3
+        self.retry_delay = 2
+    
+    def _get_connection_string(self) -> str:
+        """Erstellt die Verbindungszeichenfolge für neon.tech"""
+        database_url = st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL"))
+        
+        if database_url:
+            # Bereinige problematische Parameter
+            clean_url = database_url.replace("&channel_binding=require", "")
+            clean_url = clean_url.replace("channel_binding=require&", "")
+            clean_url = clean_url.replace("?channel_binding=require", "?sslmode=require")
+            
+            if "sslmode=" not in clean_url:
+                separator = "&" if "?" in clean_url else "?"
+                clean_url += f"{separator}sslmode=require"
+            
+            return clean_url
+        
+        # Fallback auf einzelne Parameter
+        db_host = st.secrets.get("DB_HOST", os.getenv("DB_HOST"))
+        db_port = st.secrets.get("DB_PORT", os.getenv("DB_PORT", "5432"))
+        db_name = st.secrets.get("DB_NAME", os.getenv("DB_NAME"))
+        db_user = st.secrets.get("DB_USER", os.getenv("DB_USER"))
+        db_password = st.secrets.get("DB_PASSWORD", os.getenv("DB_PASSWORD"))
+        
+        if not all([db_host, db_name, db_user, db_password]):
+            st.error("⚠️ Datenbankverbindung nicht konfiguriert!")
+            st.stop()
+        
+        return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?sslmode=require"
     
     def get_connection(self):
-        """Nutzt die Verbindung vom RobustDatabaseManager"""
-        return self.db_manager.get_connection()
+        """Erstellt eine robuste Datenbankverbindung"""
+        for attempt in range(self.max_retries):
+            try:
+                conn = psycopg2.connect(
+                    self.connection_string,
+                    connect_timeout=30,
+                    keepalives=1,
+                    keepalives_idle=600
+                )
+                
+                # Teste die Verbindung
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                
+                return conn
+                
+            except psycopg2.OperationalError as e:
+                if attempt < self.max_retries - 1:
+                    wait_time = self.retry_delay * (2 ** attempt)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    st.error(f"❌ Datenbankverbindung fehlgeschlagen: {e}")
+                    return None
+            except Exception as e:
+                st.error(f"❌ Datenbankfehler: {e}")
+                return None
+        
+        return None
     
-    def ensure_tables(self):
-        """Nutzt ensure_tables vom RobustDatabaseManager"""
-        return self.db_manager.ensure_tables()
+    def ensure_tables(self) -> bool:
+        """Erstellt Tabellen mit vereinfachter Struktur"""
+        
+        create_sql = """
+        -- Haupttabelle für Zeiteinträge
+        CREATE TABLE IF NOT EXISTS time_entries (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) NOT NULL,
+            entry_date DATE NOT NULL,
+            start_time VARCHAR(10),
+            end_time VARCHAR(10),
+            breaks_duration VARCHAR(50),
+            total_duration VARCHAR(10),
+            duration_excluding_breaks VARCHAR(10),
+            work_schedule VARCHAR(10),
+            balance VARCHAR(10),
+            absence_name VARCHAR(100),
+            remarks TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            import_hash VARCHAR(64)
+        );
+        
+        -- Import-Log Tabelle
+        CREATE TABLE IF NOT EXISTS import_sessions (
+            id SERIAL PRIMARY KEY,
+            session_id VARCHAR(100) UNIQUE NOT NULL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            total_rows INTEGER,
+            processed_rows INTEGER,
+            inserted_rows INTEGER,
+            updated_rows INTEGER,
+            skipped_rows INTEGER,
+            error_rows INTEGER,
+            duplicates_found INTEGER,
+            import_strategy VARCHAR(50),
+            errors_json TEXT,
+            warnings_json TEXT
+        );
+        
+        -- Unique Index für Duplikatsvermeidung
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_user_date 
+        ON time_entries(username, entry_date);
+        
+        -- Import Hash Index für schnelle Duplikatsprüfung
+        CREATE INDEX IF NOT EXISTS idx_import_hash
+        ON time_entries(import_hash);
+        
+        -- Performance Indices
+        CREATE INDEX IF NOT EXISTS idx_time_entries_date 
+        ON time_entries(entry_date);
+        
+        CREATE INDEX IF NOT EXISTS idx_time_entries_username 
+        ON time_entries(username);
+        
+        CREATE INDEX IF NOT EXISTS idx_time_entries_created_at 
+        ON time_entries(created_at);
+        """
+        
+        conn = self.get_connection()
+        if not conn:
+            return False
+        
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    # Führe CREATE-Statements aus
+                    statements = [stmt.strip() for stmt in create_sql.split(';') if stmt.strip() and not stmt.strip().startswith('--')]
+                    
+                    for statement in statements:
+                        if statement:
+                            try:
+                                cur.execute(statement)
+                            except Exception as stmt_error:
+                                logger.warning(f"Statement übersprungen: {stmt_error}")
+                                continue
+                    
+                    conn.commit()
+                    
+                    # Validierung
+                    cur.execute("""
+                        SELECT table_name 
+                        FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name IN ('time_entries', 'import_sessions')
+                    """)
+                    
+                    tables = [row[0] for row in cur.fetchall()]
+                    
+                    if 'time_entries' in tables:
+                        st.success("✅ Datenbank-Tabellen erfolgreich erstellt/validiert")
+                        return True
+                    else:
+                        st.error("❌ Tabellenerstellung fehlgeschlagen")
+                        return False
+                    
+        except Exception as e:
+            logger.error(f"Fehler beim Erstellen der Tabellen: {e}")
+            st.error(f"❌ Schema-Fehler: {str(e)}")
+            return False
+        finally:
+            conn.close()
     
-    def test_connection(self):
-        """Nutzt test_connection vom RobustDatabaseManager"""
-        return self.db_manager.test_connection()
+    def test_connection(self) -> tuple[bool, str]:
+        """Testet die Datenbankverbindung"""
+        try:
+            conn = self.get_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT version()")
+                    version = cur.fetchone()[0]
+                conn.close()
+                return True, f"✅ Verbindung erfolgreich - PostgreSQL aktiv"
+            else:
+                return False, "❌ Verbindung fehlgeschlagen"
+        except Exception as e:
+            return False, f"❌ Fehler: {str(e)}"
     
-    def get_statistics(self):
-        """Nutzt get_statistics vom RobustDatabaseManager"""
-        return self.db_manager.get_statistics()
+    def get_statistics(self) -> Dict:
+        """Holt Basis-Statistiken"""
+        conn = self.get_connection()
+        if not conn:
+            return {'error': 'Keine Verbindung'}
+        
+        try:
+            with conn.cursor() as cur:
+                # Prüfe ob Tabelle existiert
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_name = 'time_entries'
+                    )
+                """)
+                
+                table_exists = cur.fetchone()[0]
+                
+                if not table_exists:
+                    return {'total_entries': 0, 'total_users': 0, 'table_exists': False}
+                
+                # Statistiken abrufen
+                cur.execute("SELECT COUNT(*) as total FROM time_entries")
+                total_entries = cur.fetchone()[0]
+                
+                cur.execute("SELECT COUNT(DISTINCT username) as users FROM time_entries")
+                total_users = cur.fetchone()[0]
+                
+                cur.execute("SELECT COUNT(*) as absences FROM time_entries WHERE absence_name IS NOT NULL AND absence_name != ''")
+                total_absences = cur.fetchone()[0]
+                
+                cur.execute("SELECT MIN(entry_date) as first_date, MAX(entry_date) as last_date FROM time_entries")
+                date_result = cur.fetchone()
+                
+                cur.execute("SELECT MAX(created_at) as last_import FROM time_entries")
+                last_import = cur.fetchone()[0]
+                
+                return {
+                    'total_entries': total_entries,
+                    'total_users': total_users,
+                    'total_absences': total_absences,
+                    'first_date': date_result[0] if date_result[0] else None,
+                    'last_date': date_result[1] if date_result[1] else None,
+                    'last_import': last_import,
+                    'table_exists': True
+                }
+                
+        except Exception as e:
+            return {'error': str(e)}
+        finally:
+            conn.close()
     
-    def get_time_entries(self, limit: int = 100, offset: int = 0):
-        """Nutzt get_time_entries vom RobustDatabaseManager"""
-        return self.db_manager.get_time_entries(limit, offset)
+    def get_time_entries(self, limit: int = 100, offset: int = 0, 
+                        username: Optional[str] = None, 
+                        start_date: Optional[date] = None, 
+                        end_date: Optional[date] = None) -> pd.DataFrame:
+        """Holt Zeiterfassungsdaten mit optionalen Filtern"""
+        conn = self.get_connection()
+        if not conn:
+            return pd.DataFrame()
+        
+        try:
+            # Basis-Query
+            query = """
+            SELECT id, username, entry_date, start_time, end_time, 
+                   breaks_duration, total_duration, duration_excluding_breaks,
+                   work_schedule, balance, absence_name, remarks, 
+                   created_at, updated_at
+            FROM time_entries 
+            WHERE 1=1
+            """
+            params = []
+            
+            # Filter hinzufügen
+            if username:
+                query += " AND username = %s"
+                params.append(username)
+            
+            if start_date:
+                query += " AND entry_date >= %s"
+                params.append(start_date)
+            
+            if end_date:
+                query += " AND entry_date <= %s"
+                params.append(end_date)
+            
+            query += " ORDER BY entry_date DESC, username LIMIT %s OFFSET %s"
+            params.extend([limit, offset])
+            
+            df = pd.read_sql(query, conn, params=params)
+            return df
+        except Exception as e:
+            logger.error(f"Fehler beim Abrufen der Daten: {e}")
+            return pd.DataFrame()
+        finally:
+            conn.close()
     
     def get_employee_metrics(self, start_date: Optional[date] = None, end_date: Optional[date] = None) -> pd.DataFrame:
         """Holt erweiterte Mitarbeiter-Metriken"""
@@ -217,7 +524,7 @@ class AdvancedDatabaseManager:
                         ELSE 0 
                     END) as total_minutes,
                     AVG(CASE 
-                        WHEN start_time != '-' AND start_time != '' 
+                        WHEN start_time != '-' AND start_time != '' AND start_time ~ '^[0-9]+:[0-9]+$'
                         THEN EXTRACT(HOUR FROM start_time::time) * 60 + EXTRACT(MINUTE FROM start_time::time)
                         ELSE NULL 
                     END) as avg_start_minutes
@@ -246,48 +553,617 @@ class AdvancedDatabaseManager:
             return pd.DataFrame()
         finally:
             conn.close()
+
+class ImportManager:
+    """Verwaltet den robusten Import-Prozess"""
     
-    def get_time_patterns(self) -> pd.DataFrame:
-        """Analysiert Zeitmuster"""
-        conn = self.get_connection()
+    def __init__(self, db_manager):
+        self.db_manager = db_manager
+        self.import_session_id = self._generate_session_id()
+        
+    def _generate_session_id(self) -> str:
+        """Generiert eine eindeutige Session-ID"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        random_part = hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
+        return f"import_{timestamp}_{random_part}"
+    
+    def _generate_row_hash(self, row: pd.Series) -> str:
+        """Generiert einen Hash für eine Zeile zur Duplikatserkennung"""
+        # Erstelle einen einzigartigen String aus den wichtigen Spalten
+        hash_string = f"{row['Username']}_{row['normalized_date']}_{row.get('StartTime', '')}_{row.get('EndTime', '')}"
+        return hashlib.sha256(hash_string.encode()).hexdigest()
+    
+    def validate_and_import(self, df: pd.DataFrame, import_strategy: str = "skip_duplicates") -> Dict:
+        """Hauptfunktion für validierten Import mit verbesserter Duplikatserkennung"""
+        
+        result = {
+            'session_id': self.import_session_id,
+            'timestamp': datetime.now(),
+            'total_rows': len(df),
+            'processed_rows': 0,
+            'inserted_rows': 0,
+            'updated_rows': 0,
+            'skipped_rows': 0,
+            'error_rows': 0,
+            'duplicates_found': 0,
+            'errors': [],
+            'warnings': [],
+            'success': False
+        }
+        
+        try:
+            # Schritt 1: Datenvalidierung
+            st.info("🔍 **Schritt 1:** Validiere Datenstruktur...")
+            validation_result = self._validate_data_structure(df)
+            
+            if not validation_result['valid']:
+                result['errors'] = validation_result['errors']
+                return result
+            
+            # Schritt 2: Datenbereinigung
+            st.info("🧹 **Schritt 2:** Bereinige und normalisiere Daten...")
+            cleaned_df = self._clean_and_normalize_data(df)
+            result['processed_rows'] = len(cleaned_df)
+            
+            # Schritt 3: Duplikatserkennung
+            st.info("🔍 **Schritt 3:** Erkenne Duplikate...")
+            duplicate_analysis = self._analyze_duplicates(cleaned_df)
+            result['duplicates_found'] = duplicate_analysis['duplicate_count']
+            
+            if duplicate_analysis['duplicate_count'] > 0:
+                self._show_duplicate_analysis(duplicate_analysis)
+                
+                if import_strategy == "error_on_duplicates":
+                    result['errors'].append(f"Import abgebrochen: {duplicate_analysis['duplicate_count']} Duplikate gefunden")
+                    return result
+            
+            # Schritt 4: Import durchführen
+            st.info("💾 **Schritt 4:** Führe Import durch...")
+            import_result = self._execute_import(cleaned_df, import_strategy)
+            
+            # Ergebnisse zusammenführen
+            result.update(import_result)
+            result['success'] = True
+            
+            # Schritt 5: Import-Log erstellen
+            self._log_import_session(result)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Import-Fehler: {e}")
+            result['errors'].append(f"Unerwarteter Fehler: {str(e)}")
+            return result
+    
+    def _validate_data_structure(self, df: pd.DataFrame) -> Dict:
+        """Validiert die Datenstruktur"""
+        errors = []
+        warnings = []
+        
+        # Erforderliche Spalten
+        required_columns = ['Username', 'Date', 'StartTime', 'EndTime', 'Duration']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            errors.append(f"Fehlende erforderliche Spalten: {', '.join(missing_columns)}")
+        
+        # Datenqualität prüfen
+        if 'Username' in df.columns:
+            empty_usernames = df['Username'].isna().sum()
+            if empty_usernames > 0:
+                warnings.append(f"{empty_usernames} Zeilen haben leere Benutzernamen")
+        
+        if 'Date' in df.columns:
+            empty_dates = df['Date'].isna().sum()
+            if empty_dates > 0:
+                errors.append(f"{empty_dates} Zeilen haben leere Datumsangaben")
+        
+        return {
+            'valid': len(errors) == 0,
+            'errors': errors,
+            'warnings': warnings
+        }
+    
+    def _clean_and_normalize_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Bereinigt und normalisiert die Daten"""
+        
+        # Kopie erstellen
+        cleaned_df = df.copy()
+        
+        # Total-Zeilen entfernen
+        cleaned_df = cleaned_df[cleaned_df['Username'].str.lower() != 'total'].copy()
+        
+        # Leere Zeilen entfernen
+        cleaned_df = cleaned_df.dropna(subset=['Username', 'Date'], how='any')
+        
+        # Datum normalisieren
+        cleaned_df['normalized_date'] = cleaned_df['Date'].apply(self._parse_german_date)
+        
+        # Ungültige Datumszeilen entfernen
+        valid_dates = cleaned_df['normalized_date'].notna()
+        if not valid_dates.all():
+            invalid_count = (~valid_dates).sum()
+            st.warning(f"⚠️ {invalid_count} Zeilen mit ungültigen Datumsangaben entfernt")
+            cleaned_df = cleaned_df[valid_dates].copy()
+        
+        # String-Spalten bereinigen
+        string_columns = ['Username', 'StartTime', 'EndTime', 'Duration', 'DurationExcludingBreaks', 
+                         'Balance', 'WorkSchedule', 'Breaks', 'AbsenceName', 'Remarks']
+        
+        for col in string_columns:
+            if col in cleaned_df.columns:
+                cleaned_df[col] = cleaned_df[col].astype(str).str.strip()
+                cleaned_df[col] = cleaned_df[col].replace('nan', '')
+                cleaned_df[col] = cleaned_df[col].replace('None', '')
+        
+        # Import-Hash generieren
+        cleaned_df['import_hash'] = cleaned_df.apply(self._generate_row_hash, axis=1)
+        
+        return cleaned_df
+    
+    def _analyze_duplicates(self, df: pd.DataFrame) -> Dict:
+        """Analysiert Duplikate in den Daten"""
+        
+        # Duplikate basierend auf Username + Datum
+        date_duplicates = df.groupby(['Username', 'normalized_date']).size()
+        date_duplicates = date_duplicates[date_duplicates > 1]
+        
+        # Bestehende Duplikate in der Datenbank prüfen
+        existing_duplicates = self._check_existing_duplicates(df)
+        
+        return {
+            'duplicate_count': len(date_duplicates) + len(existing_duplicates),
+            'date_duplicates': date_duplicates,
+            'existing_duplicates': existing_duplicates,
+            'analysis': {
+                'same_date_entries': len(date_duplicates),
+                'already_in_database': len(existing_duplicates)
+            }
+        }
+    
+    def _check_existing_duplicates(self, df: pd.DataFrame) -> List[Dict]:
+        """Prüft welche Daten bereits in der Datenbank existieren"""
+        existing_duplicates = []
+        
+        conn = self.db_manager.get_connection()
+        if not conn:
+            return existing_duplicates
+        
+        try:
+            with conn.cursor() as cur:
+                # Batch-Prüfung für bessere Performance
+                user_date_pairs = [(row['Username'], row['normalized_date']) 
+                                 for _, row in df.iterrows()]
+                
+                # Erstelle temporäre Tabelle für Batch-Vergleich
+                cur.execute("""
+                    CREATE TEMP TABLE temp_import_check (
+                        username VARCHAR(100),
+                        entry_date DATE
+                    )
+                """)
+                
+                # Füge Daten in temporäre Tabelle ein
+                insert_query = "INSERT INTO temp_import_check (username, entry_date) VALUES (%s, %s)"
+                cur.executemany(insert_query, user_date_pairs)
+                
+                # Prüfe Duplikate in einem Query
+                cur.execute("""
+                    SELECT t.username, t.entry_date, e.id, e.created_at
+                    FROM temp_import_check t
+                    INNER JOIN time_entries e 
+                    ON t.username = e.username AND t.entry_date = e.entry_date
+                """)
+                
+                for row in cur.fetchall():
+                    existing_duplicates.append({
+                        'username': row[0],
+                        'date': row[1],
+                        'existing_id': row[2],
+                        'existing_created_at': row[3]
+                    })
+                
+                # Temporäre Tabelle löschen
+                cur.execute("DROP TABLE temp_import_check")
+        
+        except Exception as e:
+            logger.error(f"Fehler bei Duplikatsprüfung: {e}")
+        finally:
+            conn.close()
+        
+        return existing_duplicates
+    
+    def _show_duplicate_analysis(self, duplicate_analysis: Dict):
+        """Zeigt Duplikatsanalyse in der UI"""
+        
+        st.markdown("""
+        <div class="duplicate-warning">
+            <h4>⚠️ Duplikate gefunden</h4>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        analysis = duplicate_analysis['analysis']
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("📅 Gleiche Daten (Datei)", analysis['same_date_entries'])
+        
+        with col2:
+            st.metric("💾 Bereits in DB", analysis['already_in_database'])
+        
+        # Details anzeigen
+        if analysis['already_in_database'] > 0:
+            with st.expander("🔍 Details zu existierenden Einträgen"):
+                existing_df = pd.DataFrame(duplicate_analysis['existing_duplicates'])
+                if not existing_df.empty:
+                    st.dataframe(existing_df[['username', 'date', 'existing_created_at']], use_container_width=True)
+    
+    def _execute_import(self, df: pd.DataFrame, strategy: str) -> Dict:
+        """Führt den eigentlichen Import durch mit Batch-Operationen"""
+        
+        result = {
+            'inserted_rows': 0,
+            'updated_rows': 0,
+            'skipped_rows': 0,
+            'error_rows': 0,
+            'errors': []
+        }
+        
+        conn = self.db_manager.get_connection()
+        if not conn:
+            result['errors'].append("Keine Datenbankverbindung")
+            return result
+        
+        # SQL-Statements
+        insert_sql = """
+        INSERT INTO time_entries (
+            username, entry_date, start_time, end_time, breaks_duration,
+            total_duration, duration_excluding_breaks, work_schedule,
+            balance, absence_name, remarks, import_hash, created_at
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP
+        )
+        ON CONFLICT (username, entry_date) DO NOTHING
+        RETURNING id
+        """
+        
+        update_sql = """
+        UPDATE time_entries SET
+            start_time = %s,
+            end_time = %s,
+            breaks_duration = %s,
+            total_duration = %s,
+            duration_excluding_breaks = %s,
+            work_schedule = %s,
+            balance = %s,
+            absence_name = %s,
+            remarks = %s,
+            import_hash = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE username = %s AND entry_date = %s
+        """
+        
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    progress_bar = st.progress(0)
+                    progress_text = st.empty()
+                    
+                    # Batch-Verarbeitung für bessere Performance
+                    batch_size = 100
+                    total_rows = len(df)
+                    
+                    for batch_start in range(0, total_rows, batch_size):
+                        batch_end = min(batch_start + batch_size, total_rows)
+                        batch_df = df.iloc[batch_start:batch_end]
+                        
+                        # Progress Update
+                        progress = batch_end / total_rows
+                        progress_bar.progress(progress)
+                        progress_text.text(f"Verarbeite Batch {batch_start + 1}-{batch_end} von {total_rows}")
+                        
+                        if strategy == "skip_duplicates":
+                            # Batch-Insert mit ON CONFLICT DO NOTHING
+                            for _, row in batch_df.iterrows():
+                                try:
+                                    values = self._prepare_row_values(row)
+                                    cur.execute(insert_sql, values)
+                                    
+                                    if cur.rowcount > 0:
+                                        result['inserted_rows'] += 1
+                                    else:
+                                        result['skipped_rows'] += 1
+                                        
+                                except Exception as row_error:
+                                    result['errors'].append(f"Zeile {row.name}: {str(row_error)}")
+                                    result['error_rows'] += 1
+                        
+                        elif strategy == "update_duplicates":
+                            # Prüfe und aktualisiere existierende Einträge
+                            for _, row in batch_df.iterrows():
+                                try:
+                                    # Prüfe ob Eintrag existiert
+                                    cur.execute(
+                                        "SELECT id FROM time_entries WHERE username = %s AND entry_date = %s",
+                                        (row['Username'], row['normalized_date'])
+                                    )
+                                    existing = cur.fetchone()
+                                    
+                                    if existing:
+                                        # Update
+                                        update_values = self._prepare_update_values(row)
+                                        cur.execute(update_sql, update_values)
+                                        result['updated_rows'] += 1
+                                    else:
+                                        # Insert
+                                        values = self._prepare_row_values(row)
+                                        cur.execute(insert_sql, values)
+                                        result['inserted_rows'] += 1
+                                        
+                                except Exception as row_error:
+                                    result['errors'].append(f"Zeile {row.name}: {str(row_error)}")
+                                    result['error_rows'] += 1
+                    
+                    # Commit der Transaktion
+                    conn.commit()
+                    progress_bar.empty()
+                    progress_text.empty()
+                    
+                    # Erfolgs-Validierung
+                    cur.execute("SELECT COUNT(*) FROM time_entries")
+                    total_in_db = cur.fetchone()[0]
+                    
+                    st.success(f"✅ **Import abgeschlossen!** Gesamt in Datenbank: {total_in_db} Einträge")
+                    
+        except Exception as e:
+            error_msg = f"Import-Fehler: {str(e)}"
+            result['errors'].append(error_msg)
+            logger.error(error_msg)
+        finally:
+            conn.close()
+        
+        return result
+    
+    def _prepare_row_values(self, row) -> tuple:
+        """Bereitet Datenwerte für Insert vor"""
+        return (
+            row['Username'],
+            row['normalized_date'],
+            row.get('StartTime', ''),
+            row.get('EndTime', ''),
+            row.get('Breaks', ''),
+            row.get('Duration', ''),
+            row.get('DurationExcludingBreaks', ''),
+            row.get('WorkSchedule', ''),
+            row.get('Balance', ''),
+            row.get('AbsenceName') if pd.notna(row.get('AbsenceName')) else None,
+            row.get('Remarks') if pd.notna(row.get('Remarks')) else None,
+            row.get('import_hash', '')
+        )
+    
+    def _prepare_update_values(self, row) -> tuple:
+        """Bereitet Datenwerte für Update vor"""
+        return (
+            row.get('StartTime', ''),
+            row.get('EndTime', ''),
+            row.get('Breaks', ''),
+            row.get('Duration', ''),
+            row.get('DurationExcludingBreaks', ''),
+            row.get('WorkSchedule', ''),
+            row.get('Balance', ''),
+            row.get('AbsenceName') if pd.notna(row.get('AbsenceName')) else None,
+            row.get('Remarks') if pd.notna(row.get('Remarks')) else None,
+            row.get('import_hash', ''),
+            row['Username'],
+            row['normalized_date']
+        )
+    
+    def _log_import_session(self, result: Dict):
+        """Protokolliert die Import-Session"""
+        
+        conn = self.db_manager.get_connection()
+        if not conn:
+            return
+        
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO import_sessions (
+                            session_id, total_rows, processed_rows, inserted_rows,
+                            updated_rows, skipped_rows, error_rows, duplicates_found,
+                            import_strategy, errors_json, warnings_json
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                    """, (
+                        result['session_id'],
+                        result['total_rows'],
+                        result['processed_rows'],
+                        result['inserted_rows'],
+                        result['updated_rows'],
+                        result['skipped_rows'],
+                        result['error_rows'],
+                        result['duplicates_found'],
+                        'default',
+                        json.dumps(result.get('errors', [])),
+                        json.dumps(result.get('warnings', []))
+                    ))
+                    conn.commit()
+                    
+        except Exception as e:
+            logger.error(f"Fehler beim Protokollieren: {e}")
+        finally:
+            conn.close()
+    
+    def _parse_german_date(self, date_str: str) -> Optional[str]:
+        """Konvertiert deutsches Datumsformat zu ISO"""
+        if not date_str or pd.isna(date_str):
+            return None
+        
+        german_days = {
+            'Montag': 'Monday', 'Dienstag': 'Tuesday', 'Mittwoch': 'Wednesday',
+            'Donnerstag': 'Thursday', 'Freitag': 'Friday', 'Samstag': 'Saturday',
+            'Sonntag': 'Sunday'
+        }
+        
+        german_months = {
+            'Januar': 'January', 'Februar': 'February', 'März': 'March',
+            'April': 'April', 'Mai': 'May', 'Juni': 'June',
+            'Juli': 'July', 'August': 'August', 'September': 'September',
+            'Oktober': 'October', 'November': 'November', 'Dezember': 'December'
+        }
+        
+        try:
+            english_date = str(date_str)
+            for german, english in german_days.items():
+                english_date = english_date.replace(german, english)
+            for german, english in german_months.items():
+                english_date = english_date.replace(german, english)
+            
+            parsed_date = datetime.strptime(english_date, "%A, %d. %B %Y")
+            return parsed_date.strftime("%Y-%m-%d")
+        except Exception as e:
+            logger.warning(f"Datum konnte nicht geparst werden: {date_str} - {e}")
+            return None
+    
+    def get_import_history(self) -> pd.DataFrame:
+        """Holt die Import-Historie"""
+        conn = self.db_manager.get_connection()
         if not conn:
             return pd.DataFrame()
         
         try:
             query = """
-            SELECT 
-                EXTRACT(DOW FROM entry_date) as weekday,
-                EXTRACT(HOUR FROM start_time::time) as start_hour,
-                COUNT(*) as frequency,
-                username
-            FROM time_entries
-            WHERE start_time ~ '^[0-9]{2}:[0-9]{2}$'
-            GROUP BY weekday, start_hour, username
+            SELECT session_id, timestamp, total_rows, processed_rows,
+                   inserted_rows, updated_rows, skipped_rows, error_rows,
+                   duplicates_found, import_strategy
+            FROM import_sessions 
+            ORDER BY timestamp DESC
+            LIMIT 50
             """
-            
             df = pd.read_sql(query, conn)
             return df
-            
         except Exception as e:
-            logger.error(f"Fehler beim Abrufen der Zeitmuster: {e}")
+            logger.error(f"Fehler beim Abrufen der Import-Historie: {e}")
             return pd.DataFrame()
         finally:
             conn.close()
 
-class EnhancedTimeMotoAnalytics:
-    """Erweiterte Analytics-Klasse"""
+class TimeMotoAnalytics:
+    """Analytics-Klasse für TimeMoto Daten"""
     
     def __init__(self, df: pd.DataFrame):
-        self.base_analytics = TimeMotoAnalytics(df)
-        self.df = self.base_analytics.df
+        self.df = self.prepare_data(df)
     
-    def get_employee_summary(self):
-        """Nutzt get_employee_summary von TimeMotoAnalytics"""
-        return self.base_analytics.get_employee_summary()
+    def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Bereitet die Daten für Analysen vor"""
+        df = df.copy()
+        
+        # Datum parsen
+        df['parsed_date'] = pd.to_datetime(df['entry_date'])
+        df['weekday'] = df['parsed_date'].dt.day_name()
+        df['week_number'] = df['parsed_date'].dt.isocalendar().week
+        df['month'] = df['parsed_date'].dt.month
+        df['year'] = df['parsed_date'].dt.year
+        
+        # Arbeitscodes aus Remarks extrahieren
+        df['work_code'] = df['remarks'].apply(self.extract_work_code)
+        
+        # Balance zu numerisch konvertieren
+        df['balance_minutes'] = df['balance'].apply(self.time_to_minutes)
+        df['duration_minutes'] = df['duration_excluding_breaks'].apply(self.time_to_minutes)
+        
+        # Arbeitszeitttyp klassifizieren
+        df['time_type'] = df.apply(self.classify_time_type, axis=1)
+        
+        return df
     
-    def get_daily_analysis(self):
-        """Nutzt get_daily_analysis von TimeMotoAnalytics"""
-        return self.base_analytics.get_daily_analysis()
+    def extract_work_code(self, remarks: str) -> Optional[str]:
+        """Extrahiert Arbeitscodes aus Remarks"""
+        if not remarks or pd.isna(remarks):
+            return None
+        
+        match = re.search(r'Arbeitscodes:\s*([^.\r\n]+)', str(remarks))
+        if match:
+            return match.group(1).strip()
+        return None
+    
+    def time_to_minutes(self, time_str: str) -> int:
+        """Konvertiert Zeitstring zu Minuten"""
+        if not time_str or pd.isna(time_str) or time_str in ['', '-']:
+            return 0
+        
+        try:
+            clean_time = str(time_str).replace('+', '').replace('-', '')
+            
+            if ':' in clean_time:
+                parts = clean_time.split(':')
+                hours = int(parts[0])
+                minutes = int(parts[1])
+                total_minutes = hours * 60 + minutes
+                
+                if str(time_str).startswith('-'):
+                    total_minutes = -total_minutes
+                
+                return total_minutes
+        except:
+            pass
+        
+        return 0
+    
+    def classify_time_type(self, row) -> str:
+        """Klassifiziert den Arbeitszeitttyp"""
+        start_time = str(row['start_time'])
+        end_time = str(row['end_time'])
+        absence = row['absence_name']
+        
+        if absence and not pd.isna(absence):
+            return 'Abwesenheit'
+        elif start_time == '-' or end_time == '-':
+            return 'Keine Erfassung'
+        elif start_time == '<':
+            return 'Früher Beginn'
+        elif end_time == '>':
+            return 'Spätes Ende'
+        elif start_time and end_time and start_time != '' and end_time != '':
+            return 'Normal'
+        else:
+            return 'Unbekannt'
+    
+    def get_employee_summary(self) -> pd.DataFrame:
+        """Erstellt Mitarbeiter-Zusammenfassung"""
+        summary = self.df.groupby('username').agg({
+            'parsed_date': 'count',
+            'balance_minutes': 'sum',
+            'duration_minutes': 'sum',
+            'absence_name': lambda x: x.notna().sum(),
+            'work_code': lambda x: x.notna().sum()
+        }).reset_index()
+        
+        summary.columns = ['Mitarbeiter', 'Arbeitstage', 'Saldo_Minuten', 'Arbeitszeit_Minuten', 'Abwesenheiten', 'Projekte']
+        
+        summary['Saldo_Stunden'] = round(summary['Saldo_Minuten'] / 60, 2)
+        summary['Arbeitszeit_Stunden'] = round(summary['Arbeitszeit_Minuten'] / 60, 2)
+        
+        return summary
+    
+    def get_daily_analysis(self) -> pd.DataFrame:
+        """Tägliche Analyse"""
+        daily = self.df.groupby('parsed_date').agg({
+            'username': 'nunique',
+            'balance_minutes': 'sum',
+            'duration_minutes': 'sum',
+            'absence_name': lambda x: x.notna().sum(),
+            'time_type': lambda x: (x == 'Normal').sum()
+        }).reset_index()
+        
+        daily.columns = ['Datum', 'Mitarbeiter_Anzahl', 'Gesamt_Saldo_Min', 'Gesamt_Arbeitszeit_Min', 'Abwesenheiten', 'Normale_Erfassungen']
+        daily['Gesamt_Saldo_Std'] = round(daily['Gesamt_Saldo_Min'] / 60, 2)
+        daily['Gesamt_Arbeitszeit_Std'] = round(daily['Gesamt_Arbeitszeit_Min'] / 60, 2)
+        
+        return daily
     
     def calculate_overtime(self, standard_hours: float = 8.0) -> pd.DataFrame:
         """Berechnet Überstunden pro Mitarbeiter"""
@@ -306,15 +1182,24 @@ class EnhancedTimeMotoAnalytics:
         # Arbeitszeit-Effizienz
         work_df = self.df[self.df['time_type'] == 'Normal'].copy()
         
+        if work_df.empty:
+            return pd.DataFrame()
+        
         metrics = []
         for user in work_df['username'].unique():
             user_data = work_df[work_df['username'] == user]
+            
+            if len(user_data) == 0:
+                continue
             
             # Durchschnittliche Tagesleistung
             avg_daily_hours = user_data['duration_minutes'].mean() / 60
             
             # Konsistenz (niedrigere Standardabweichung = höhere Konsistenz)
-            consistency = 100 - min(user_data['duration_minutes'].std() / user_data['duration_minutes'].mean() * 100, 100)
+            if len(user_data) > 1 and user_data['duration_minutes'].std() > 0:
+                consistency = 100 - min(user_data['duration_minutes'].std() / user_data['duration_minutes'].mean() * 100, 100)
+            else:
+                consistency = 100
             
             # Pünktlichkeit (Anteil der Tage mit normalem Start)
             punctuality = (user_data['time_type'] == 'Normal').sum() / len(user_data) * 100
@@ -357,14 +1242,16 @@ class EnhancedTimeMotoAnalytics:
         insights = []
         
         # Wochentag-Insight
-        max_weekday = weekday_pattern.idxmax()
-        if weekday_pattern[max_weekday] > weekday_pattern.mean() * 1.5:
-            insights.append(f"📊 Auffällig viele Abwesenheiten am {max_weekday}")
+        if len(weekday_pattern) > 0:
+            max_weekday = weekday_pattern.idxmax()
+            if weekday_pattern[max_weekday] > weekday_pattern.mean() * 1.5:
+                insights.append(f"📊 Auffällig viele Abwesenheiten am {max_weekday}")
         
         # Monats-Insight
-        max_month = monthly_pattern.idxmax()
-        if monthly_pattern[max_month] > monthly_pattern.mean() * 1.5:
-            insights.append(f"📅 Erhöhte Abwesenheiten im {max_month}")
+        if len(monthly_pattern) > 0:
+            max_month = monthly_pattern.idxmax()
+            if monthly_pattern[max_month] > monthly_pattern.mean() * 1.5:
+                insights.append(f"📅 Erhöhte Abwesenheiten im {max_month}")
         
         return {
             'weekday_pattern': weekday_pattern,
@@ -388,8 +1275,11 @@ class EnhancedTimeMotoAnalytics:
         # Gini-Koeffizient für Gleichverteilung
         sorted_workload = np.sort(workload['total_minutes'])
         n = len(sorted_workload)
-        index = np.arange(1, n + 1)
-        gini = (2 * np.sum(index * sorted_workload)) / (n * np.sum(sorted_workload)) - (n + 1) / n
+        if n > 0:
+            index = np.arange(1, n + 1)
+            gini = (2 * np.sum(index * sorted_workload)) / (n * np.sum(sorted_workload)) - (n + 1) / n
+        else:
+            gini = 0
         
         workload['team_gini_coefficient'] = round(gini, 3)
         
@@ -425,96 +1315,92 @@ class AdvancedVisualizationManager:
     @staticmethod
     def create_heatmap(data: pd.DataFrame, x_col: str, y_col: str, z_col: str, title: str) -> go.Figure:
         """Erstellt eine Heatmap"""
-        pivot_data = data.pivot(index=y_col, columns=x_col, values=z_col)
-        
-        fig = go.Figure(data=go.Heatmap(
-            z=pivot_data.values,
-            x=pivot_data.columns,
-            y=pivot_data.index,
-            colorscale='Viridis',
-            text=pivot_data.values,
-            texttemplate='%{text:.0f}',
-            textfont={"size": 10}
-        ))
-        
-        fig.update_layout(
-            title=title,
-            xaxis_title=x_col,
-            yaxis_title=y_col,
-            height=600
-        )
-        
-        return fig
+        try:
+            pivot_data = data.pivot(index=y_col, columns=x_col, values=z_col)
+            
+            fig = go.Figure(data=go.Heatmap(
+                z=pivot_data.values,
+                x=pivot_data.columns,
+                y=pivot_data.index,
+                colorscale='Viridis',
+                text=pivot_data.values,
+                texttemplate='%{text:.0f}',
+                textfont={"size": 10}
+            ))
+            
+            fig.update_layout(
+                title=title,
+                xaxis_title=x_col,
+                yaxis_title=y_col,
+                height=600
+            )
+            
+            return fig
+        except Exception as e:
+            logger.error(f"Fehler beim Erstellen der Heatmap: {e}")
+            return None
     
     @staticmethod
     def create_radar_chart(data: pd.DataFrame, categories: List[str], title: str) -> go.Figure:
         """Erstellt ein Radar-Chart"""
-        fig = go.Figure()
-        
-        for _, row in data.iterrows():
-            fig.add_trace(go.Scatterpolar(
-                r=[row[cat] for cat in categories],
-                theta=categories,
-                fill='toself',
-                name=row['username']
-            ))
-        
-        fig.update_layout(
-            polar=dict(
-                radialaxis=dict(
-                    visible=True,
-                    range=[0, 100]
-                )
-            ),
-            showlegend=True,
-            title=title
-        )
-        
-        return fig
-    
-    @staticmethod
-    def create_sankey_diagram(source: List, target: List, value: List, title: str) -> go.Figure:
-        """Erstellt ein Sankey-Diagramm"""
-        fig = go.Figure(data=[go.Sankey(
-            node=dict(
-                pad=15,
-                thickness=20,
-                line=dict(color="black", width=0.5),
-                label=list(set(source + target))
-            ),
-            link=dict(
-                source=source,
-                target=target,
-                value=value
+        try:
+            fig = go.Figure()
+            
+            for _, row in data.iterrows():
+                fig.add_trace(go.Scatterpolar(
+                    r=[row[cat] for cat in categories],
+                    theta=categories,
+                    fill='toself',
+                    name=row['username']
+                ))
+            
+            fig.update_layout(
+                polar=dict(
+                    radialaxis=dict(
+                        visible=True,
+                        range=[0, 100]
+                    )
+                ),
+                showlegend=True,
+                title=title
             )
-        )])
-        
-        fig.update_layout(title_text=title, font_size=10)
-        return fig
+            
+            return fig
+        except Exception as e:
+            logger.error(f"Fehler beim Erstellen des Radar-Charts: {e}")
+            return None
     
     @staticmethod
     def create_box_plot(data: pd.DataFrame, x_col: str, y_col: str, title: str) -> go.Figure:
         """Erstellt Box-Plots"""
-        fig = px.box(data, x=x_col, y=y_col, title=title)
-        fig.update_layout(showlegend=False)
-        return fig
+        try:
+            fig = px.box(data, x=x_col, y=y_col, title=title)
+            fig.update_layout(showlegend=False)
+            return fig
+        except Exception as e:
+            logger.error(f"Fehler beim Erstellen des Box-Plots: {e}")
+            return None
     
     @staticmethod
     def create_treemap(data: pd.DataFrame, path: List[str], values: str, title: str) -> go.Figure:
         """Erstellt eine Treemap"""
-        fig = px.treemap(
-            data,
-            path=path,
-            values=values,
-            title=title
-        )
-        fig.update_traces(textinfo="label+percent parent+value")
-        return fig
+        try:
+            fig = px.treemap(
+                data,
+                path=path,
+                values=values,
+                title=title
+            )
+            fig.update_traces(textinfo="label+percent parent+value")
+            return fig
+        except Exception as e:
+            logger.error(f"Fehler beim Erstellen der Treemap: {e}")
+            return None
 
 class ReportGenerator:
     """Generiert professionelle Berichte"""
     
-    def __init__(self, analytics: EnhancedTimeMotoAnalytics):
+    def __init__(self, analytics: TimeMotoAnalytics):
         self.analytics = analytics
     
     def generate_executive_summary(self) -> Dict:
@@ -524,16 +1410,22 @@ class ReportGenerator:
         # Kernmetriken berechnen
         total_employees = df['username'].nunique()
         total_work_hours = df['duration_minutes'].sum() / 60
-        avg_daily_hours = df.groupby(['username', 'parsed_date'])['duration_minutes'].sum().mean() / 60
-        absence_rate = (df['absence_name'].notna().sum() / len(df)) * 100
+        avg_daily_hours = df.groupby(['username', 'parsed_date'])['duration_minutes'].sum().mean() / 60 if not df.empty else 0
+        absence_rate = (df['absence_name'].notna().sum() / len(df)) * 100 if len(df) > 0 else 0
         
         # Trends berechnen
         weekly_hours = df.groupby(pd.Grouper(key='parsed_date', freq='W'))['duration_minutes'].sum()
-        trend = "steigend" if weekly_hours.iloc[-1] > weekly_hours.mean() else "fallend"
+        if len(weekly_hours) > 1:
+            trend = "steigend" if weekly_hours.iloc[-1] > weekly_hours.mean() else "fallend"
+        else:
+            trend = "unbekannt"
         
         # Top-Performer identifizieren
         productivity_metrics = self.analytics.calculate_productivity_metrics()
-        top_performer = productivity_metrics.nlargest(1, 'productivity_score').iloc[0]
+        if not productivity_metrics.empty:
+            top_performer = productivity_metrics.nlargest(1, 'productivity_score').iloc[0].to_dict()
+        else:
+            top_performer = {}
         
         # Insights generieren
         insights = []
@@ -595,11 +1487,12 @@ class ReportGenerator:
 - **Trend:** {summary['metrics']['trend']}
 
 ### Top Performer
-**{summary['top_performer']['username']}** - Produktivitätsscore: {summary['top_performer']['productivity_score']}
-
-### Wichtige Erkenntnisse
 """
         
+        if summary['top_performer']:
+            report += f"**{summary['top_performer']['username']}** - Produktivitätsscore: {summary['top_performer']['productivity_score']}\n"
+        
+        report += "\n### Wichtige Erkenntnisse\n"
         for insight in summary['insights']:
             report += f"- {insight}\n"
         
@@ -608,15 +1501,535 @@ class ReportGenerator:
             report += f"- {rec}\n"
         
         return report
+    
+    def generate_employee_report(self, username: str) -> str:
+        """Generiert Mitarbeiter-spezifischen Bericht"""
+        emp_data = self.analytics.df[self.analytics.df['username'] == username]
+        
+        if emp_data.empty:
+            return f"Keine Daten für Mitarbeiter {username} gefunden."
+        
+        # Metriken berechnen
+        total_days = emp_data['entry_date'].nunique()
+        work_days = emp_data[emp_data['absence_name'].isna()]['entry_date'].nunique()
+        absence_days = emp_data[emp_data['absence_name'].notna()]['entry_date'].nunique()
+        avg_hours = emp_data['duration_minutes'].mean() / 60
+        total_hours = emp_data['duration_minutes'].sum() / 60
+        balance_hours = emp_data['balance_minutes'].sum() / 60
+        
+        report = f"""
+# Mitarbeiter-Report: {username}
+**Erstellt am:** {datetime.now().strftime('%d.%m.%Y %H:%M')}
 
-class EnhancedTimeMotoApp:
-    """Erweiterte Hauptanwendungsklasse"""
+## Übersicht
+- **Erfasste Tage:** {total_days}
+- **Arbeitstage:** {work_days}
+- **Abwesenheitstage:** {absence_days}
+- **Durchschnittliche Arbeitszeit:** {avg_hours:.1f}h
+- **Gesamtarbeitszeit:** {total_hours:.1f}h
+- **Saldo:** {balance_hours:.1f}h
+
+## Abwesenheiten
+"""
+        
+        # Abwesenheitsdetails
+        absences = emp_data[emp_data['absence_name'].notna()]['absence_name'].value_counts()
+        if not absences.empty:
+            for reason, count in absences.items():
+                report += f"- **{reason}:** {count} Tage\n"
+        else:
+            report += "Keine Abwesenheiten verzeichnet.\n"
+        
+        return report
+
+def safe_plotly_chart(fig, title="Chart", fallback_data=None):
+    """Sichere Plotly-Chart Anzeige"""
+    try:
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+            return True
+        else:
+            st.warning(f"⚠️ {title}: Keine Daten verfügbar")
+            return False
+    except Exception as e:
+        st.error(f"❌ Fehler bei {title}: {str(e)}")
+        if fallback_data is not None:
+            st.dataframe(fallback_data, use_container_width=True)
+        return False
+
+class TimeMotoApp:
+    """Hauptanwendungsklasse mit erweiterten Reporting-Funktionen"""
     
     def __init__(self):
-        self.db_manager = AdvancedDatabaseManager()
+        self.db_manager = RobustDatabaseManager()
         self.viz_manager = AdvancedVisualizationManager()
-        # Basis-App-Funktionen
-        self.base_app = TimeMotoApp()
+    
+    def run(self):
+        """Startet die erweiterte Streamlit Anwendung"""
+        # Header
+        st.markdown("""
+        <div class="main-header">
+            <h1>⏰ TimeMoto Analytics Pro</h1>
+            <p>Erweiterte Zeiterfassung mit KI-gestützten Insights und professionellen Auswertungen</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Sidebar Navigation mit erweiterten Optionen
+        st.sidebar.title("🔧 Navigation")
+        page = st.sidebar.selectbox(
+            "Seite auswählen:",
+            [
+                "🏠 Executive Dashboard",
+                "📊 Team Performance",
+                "📈 Trend-Analysen", 
+                "⏱️ Überstunden-Management",
+                "🏥 Abwesenheits-Analyse",
+                "👤 Mitarbeiter-Details",
+                "📋 Produktivitäts-Matrix",
+                "🎯 KPI-Tracking",
+                "📄 Berichte",
+                "📤 Robuster Import", 
+                "📋 Daten anzeigen", 
+                "⚙️ Einstellungen"
+            ]
+        )
+        
+        # Seiten-Routing
+        if page == "🏠 Executive Dashboard":
+            self.show_executive_dashboard()
+        elif page == "📊 Team Performance":
+            self.show_team_performance()
+        elif page == "📈 Trend-Analysen":
+            self.show_trend_analysis()
+        elif page == "⏱️ Überstunden-Management":
+            self.show_overtime_management()
+        elif page == "🏥 Abwesenheits-Analyse":
+            self.show_absence_analysis()
+        elif page == "👤 Mitarbeiter-Details":
+            self.show_employee_details()
+        elif page == "📋 Produktivitäts-Matrix":
+            self.show_productivity_matrix()
+        elif page == "🎯 KPI-Tracking":
+            self.show_kpi_tracking()
+        elif page == "📄 Berichte":
+            self.show_reports()
+        elif page == "📤 Robuster Import":
+            self.show_robust_import()
+        elif page == "📋 Daten anzeigen":
+            self.show_data_view()
+        elif page == "⚙️ Einstellungen":
+            self.show_settings()
+    
+    def show_executive_dashboard(self):
+        """Zeigt Executive Dashboard"""
+        st.header("🏠 Executive Dashboard")
+        
+        # Daten laden
+        df = self.db_manager.get_time_entries(limit=5000)
+        if df.empty:
+            st.info("📭 Keine Daten verfügbar.")
+            return
+        
+        analytics = TimeMotoAnalytics(df)
+        productivity_metrics = analytics.calculate_productivity_metrics()
+        
+        if productivity_metrics.empty:
+            st.warning("Nicht genügend Daten für Produktivitätsanalyse")
+            return
+        
+        # Produktivitäts-Scatter
+        fig = px.scatter(
+            productivity_metrics,
+            x='consistency_score',
+            y='punctuality_score',
+            size='avg_daily_hours',
+            color='productivity_score',
+            hover_name='username',
+            title="Produktivitäts-Matrix",
+            labels={
+                'consistency_score': 'Konsistenz-Score',
+                'punctuality_score': 'Pünktlichkeits-Score'
+            },
+            color_continuous_scale='Viridis'
+        )
+        
+        # Quadranten hinzufügen
+        fig.add_hline(y=50, line_dash="dash", line_color="gray")
+        fig.add_vline(x=50, line_dash="dash", line_color="gray")
+        
+        # Quadranten-Labels
+        fig.add_annotation(x=75, y=75, text="High Performer", showarrow=False)
+        fig.add_annotation(x=25, y=75, text="Pünktlich aber inkonsistent", showarrow=False)
+        fig.add_annotation(x=75, y=25, text="Konsistent aber unpünktlich", showarrow=False)
+        fig.add_annotation(x=25, y=25, text="Verbesserungsbedarf", showarrow=False)
+        
+        safe_plotly_chart(fig, "Produktivitäts-Matrix")
+        
+        # Top und Bottom Performer
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🌟 Top 5 Performer")
+            top_performers = productivity_metrics.nlargest(5, 'productivity_score')[
+                ['username', 'productivity_score', 'avg_daily_hours']
+            ]
+            st.dataframe(top_performers, use_container_width=True)
+        
+        with col2:
+            st.subheader("📉 Verbesserungspotential")
+            bottom_performers = productivity_metrics.nsmallest(5, 'productivity_score')[
+                ['username', 'productivity_score', 'avg_daily_hours']
+            ]
+            st.dataframe(bottom_performers, use_container_width=True)
+        
+        # Detaillierte Metriken
+        st.subheader("📊 Detaillierte Produktivitätsmetriken")
+        
+        # Sortierbare Tabelle
+        st.dataframe(
+            productivity_metrics.style.background_gradient(
+                subset=['productivity_score', 'consistency_score', 'punctuality_score'],
+                cmap='RdYlGn'
+            ),
+            use_container_width=True,
+            height=400
+        )
+    
+    def show_kpi_tracking(self):
+        """KPI-Tracking Dashboard"""
+        st.header("🎯 KPI-Tracking")
+        
+        df = self.db_manager.get_time_entries(limit=5000)
+        if df.empty:
+            st.info("📭 Keine Daten verfügbar.")
+            return
+        
+        analytics = TimeMotoAnalytics(df)
+        
+        # KPI-Definitionen
+        st.subheader("📏 KPI-Definitionen")
+        
+        kpi_definitions = {
+            "Anwesenheitsrate": "Prozentsatz der geplanten Arbeitstage ohne Abwesenheit",
+            "Durchschnittliche Arbeitszeit": "Mittlere tägliche Arbeitszeit aller Mitarbeiter",
+            "Überstundenquote": "Prozentsatz der Arbeit über 8 Stunden/Tag",
+            "Pünktlichkeitsrate": "Prozentsatz der Tage mit normalem Arbeitsbeginn",
+            "Team-Effizienz": "Verhältnis von produktiver Zeit zu Anwesenheitszeit"
+        }
+        
+        with st.expander("📖 KPI-Erklärungen"):
+            for kpi, definition in kpi_definitions.items():
+                st.write(f"**{kpi}:** {definition}")
+        
+        # KPI-Berechnung
+        total_days = df['entry_date'].nunique()
+        absence_days = df[df['absence_name'].notna()]['entry_date'].nunique()
+        anwesenheitsrate = ((total_days - absence_days) / total_days * 100) if total_days > 0 else 0
+        
+        avg_work_time = analytics.df['duration_minutes'].mean() / 60 if not analytics.df.empty else 0
+        
+        overtime_days = df[analytics.df['duration_minutes'] > 480]['entry_date'].nunique()
+        überstundenquote = (overtime_days / total_days * 100) if total_days > 0 else 0
+        
+        normal_starts = analytics.df[analytics.df['time_type'] == 'Normal']['entry_date'].nunique()
+        pünktlichkeitsrate = (normal_starts / total_days * 100) if total_days > 0 else 0
+        
+        # KPI-Dashboard
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=anwesenheitsrate,
+                domain={'x': [0, 1], 'y': [0, 1]},
+                title={'text': "Anwesenheitsrate"},
+                delta={'reference': 95},
+                gauge={
+                    'axis': {'range': [None, 100]},
+                    'bar': {'color': "darkblue"},
+                    'steps': [
+                        {'range': [0, 50], 'color': "lightgray"},
+                        {'range': [50, 80], 'color': "gray"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 90
+                    }
+                }
+            ))
+            fig.update_layout(height=300)
+            safe_plotly_chart(fig, "Anwesenheitsrate KPI")
+        
+        with col2:
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=avg_work_time,
+                domain={'x': [0, 1], 'y': [0, 1]},
+                title={'text': "Ø Arbeitszeit (h)"},
+                delta={'reference': 8},
+                gauge={
+                    'axis': {'range': [0, 12]},
+                    'bar': {'color': "darkgreen"},
+                    'steps': [
+                        {'range': [0, 6], 'color': "lightgray"},
+                        {'range': [6, 9], 'color': "gray"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 8
+                    }
+                }
+            ))
+            fig.update_layout(height=300)
+            safe_plotly_chart(fig, "Arbeitszeit KPI")
+        
+        with col3:
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=pünktlichkeitsrate,
+                domain={'x': [0, 1], 'y': [0, 1]},
+                title={'text': "Pünktlichkeitsrate"},
+                delta={'reference': 90},
+                gauge={
+                    'axis': {'range': [None, 100]},
+                    'bar': {'color': "darkorange"},
+                    'steps': [
+                        {'range': [0, 50], 'color': "lightgray"},
+                        {'range': [50, 80], 'color': "gray"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 85
+                    }
+                }
+            ))
+            fig.update_layout(height=300)
+            safe_plotly_chart(fig, "Pünktlichkeit KPI")
+        
+        # KPI-Verlauf
+        st.subheader("📈 KPI-Entwicklung")
+        
+        # Wöchentliche KPI-Entwicklung berechnen
+        weekly_kpis = []
+        for week_start in pd.date_range(df['entry_date'].min(), df['entry_date'].max(), freq='W'):
+            week_end = week_start + timedelta(days=6)
+            week_data = df[(df['entry_date'] >= week_start) & (df['entry_date'] <= week_end)]
+            
+            if not week_data.empty:
+                week_analytics = TimeMotoAnalytics(week_data)
+                week_total_days = week_data['entry_date'].nunique()
+                week_absence_days = week_data[week_data['absence_name'].notna()]['entry_date'].nunique()
+                week_anwesenheit = ((week_total_days - week_absence_days) / week_total_days * 100) if week_total_days > 0 else 0
+                
+                week_avg_time = week_analytics.df['duration_minutes'].mean() / 60 if not week_analytics.df.empty else 0
+                
+                weekly_kpis.append({
+                    'week': week_start,
+                    'anwesenheitsrate': week_anwesenheit,
+                    'avg_arbeitszeit': week_avg_time
+                })
+        
+        if weekly_kpis:
+            kpi_df = pd.DataFrame(weekly_kpis)
+            
+            fig = make_subplots(
+                rows=2, cols=1,
+                subplot_titles=("Anwesenheitsrate", "Durchschnittliche Arbeitszeit"),
+                vertical_spacing=0.15
+            )
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=kpi_df['week'],
+                    y=kpi_df['anwesenheitsrate'],
+                    mode='lines+markers',
+                    name='Anwesenheitsrate',
+                    line=dict(color='blue')
+                ),
+                row=1, col=1
+            )
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=kpi_df['week'],
+                    y=kpi_df['avg_arbeitszeit'],
+                    mode='lines+markers',
+                    name='Arbeitszeit',
+                    line=dict(color='green')
+                ),
+                row=2, col=1
+            )
+            
+            fig.update_yaxes(title_text="Prozent", row=1, col=1)
+            fig.update_yaxes(title_text="Stunden", row=2, col=1)
+            fig.update_xaxes(title_text="Woche", row=2, col=1)
+            
+            fig.update_layout(height=600, showlegend=False)
+            safe_plotly_chart(fig, "KPI Verlauf")
+    
+    def show_reports(self):
+        """Berichts-Center"""
+        st.header("📄 Berichts-Center")
+        
+        df = self.db_manager.get_time_entries(limit=5000)
+        if df.empty:
+            st.info("📭 Keine Daten verfügbar.")
+            return
+        
+        analytics = TimeMotoAnalytics(df)
+        report_gen = ReportGenerator(analytics)
+        
+        # Report-Typ auswählen
+        report_type = st.selectbox(
+            "Bericht auswählen:",
+            ["Executive Summary", "Detaillierter Analysebericht", "Mitarbeiter-Report", "Team-Performance-Report"]
+        )
+        
+        # Zeitraum wählen
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input("Von:", df['entry_date'].min())
+        with col2:
+            end_date = st.date_input("Bis:", df['entry_date'].max())
+        
+        # Report generieren
+        if st.button("📊 Bericht generieren", type="primary"):
+            
+            # Daten filtern
+            filtered_df = df[(df['entry_date'] >= start_date) & (df['entry_date'] <= end_date)]
+            
+            if filtered_df.empty:
+                st.warning("Keine Daten im gewählten Zeitraum")
+                return
+            
+            filtered_analytics = TimeMotoAnalytics(filtered_df)
+            filtered_report_gen = ReportGenerator(filtered_analytics)
+            
+            if report_type == "Executive Summary":
+                summary = filtered_report_gen.generate_executive_summary()
+                
+                # Summary anzeigen
+                st.markdown("### 📊 Executive Summary")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Mitarbeiter", summary['metrics']['total_employees'])
+                    st.metric("Gesamtstunden", f"{summary['metrics']['total_work_hours']:.0f}h")
+                
+                with col2:
+                    st.metric("Ø Tagesstunden", f"{summary['metrics']['avg_daily_hours']:.1f}h")
+                    st.metric("Abwesenheitsrate", f"{summary['metrics']['absence_rate']:.1f}%")
+                
+                # Insights
+                st.markdown("### 💡 Wichtige Erkenntnisse")
+                for insight in summary['insights']:
+                    st.info(insight)
+                
+                # Empfehlungen
+                st.markdown("### 🎯 Handlungsempfehlungen")
+                for rec in summary['recommendation']:
+                    st.success(rec)
+                
+                # Download-Option
+                report_content = filtered_report_gen.generate_detailed_report()
+                st.download_button(
+                    label="📥 Report als Markdown herunterladen",
+                    data=report_content,
+                    file_name=f"executive_summary_{datetime.now().strftime('%Y%m%d')}.md",
+                    mime="text/markdown"
+                )
+            
+            elif report_type == "Detaillierter Analysebericht":
+                # Umfassender Bericht mit allen Analysen
+                st.markdown("### 📊 Detaillierter Analysebericht")
+                
+                # Verschiedene Analysen durchführen
+                tabs = st.tabs(["Übersicht", "Produktivität", "Abwesenheiten", "Überstunden", "Trends"])
+                
+                with tabs[0]:
+                    summary = filtered_report_gen.generate_executive_summary()
+                    st.write(filtered_report_gen.generate_detailed_report())
+                
+                with tabs[1]:
+                    productivity = filtered_analytics.calculate_productivity_metrics()
+                    if not productivity.empty:
+                        st.dataframe(productivity, use_container_width=True)
+                    else:
+                        st.info("Keine Produktivitätsdaten verfügbar")
+                
+                with tabs[2]:
+                    absence = filtered_analytics.analyze_absence_patterns()
+                    if absence['insights']:
+                        for insight in absence['insights']:
+                            st.info(insight)
+                    
+                    if not absence['reason_pattern'].empty:
+                        st.bar_chart(absence['reason_pattern'])
+                
+                with tabs[3]:
+                    overtime = filtered_analytics.calculate_overtime()
+                    if not overtime.empty:
+                        st.metric("Gesamt-Überstunden", f"{overtime['overtime_hours'].sum():.0f}h")
+                        st.line_chart(overtime.groupby('parsed_date')['overtime_hours'].sum())
+                
+                with tabs[4]:
+                    predictions = filtered_analytics.predict_future_workload(14)
+                    if not predictions.empty:
+                        st.line_chart(predictions.groupby('date')['predicted_hours'].sum())
+            
+            elif report_type == "Mitarbeiter-Report":
+                # Mitarbeiter-spezifischer Report
+                selected_employee = st.selectbox(
+                    "Mitarbeiter wählen:",
+                    sorted(filtered_df['username'].unique())
+                )
+                
+                if selected_employee:
+                    report_content = filtered_report_gen.generate_employee_report(selected_employee)
+                    
+                    # Report anzeigen
+                    st.markdown(report_content)
+                    
+                    # Download-Option
+                    st.download_button(
+                        label="📥 Report herunterladen",
+                        data=report_content,
+                        file_name=f"mitarbeiter_report_{selected_employee}_{datetime.now().strftime('%Y%m%d')}.md",
+                        mime="text/markdown"
+                    )
+            
+            elif report_type == "Team-Performance-Report":
+                # Team-Performance Report
+                st.markdown("### 📊 Team-Performance Report")
+                
+                # Team-Metriken
+                workload = filtered_analytics.calculate_team_workload_distribution()
+                
+                if not workload.empty:
+                    st.subheader("Arbeitsverteilung")
+                    st.dataframe(workload[['username', 'total_hours', 'workload_share']], use_container_width=True)
+                    
+                    # Performance-Metriken
+                    productivity = filtered_analytics.calculate_productivity_metrics()
+                    if not productivity.empty:
+                        st.subheader("Produktivitäts-Scores")
+                        st.dataframe(productivity, use_container_width=True)
+                
+                # Export-Option
+                export_data = {
+                    'workload': workload.to_dict() if not workload.empty else {},
+                    'productivity': productivity.to_dict() if not productivity.empty else {}
+                }
+                
+                st.download_button(
+                    label="📥 Daten als JSON exportieren",
+                    data=json.dumps(export_data, indent=2),
+                    file_name=f"team_performance_{datetime.now().strftime('%Y%m%d')}.json",
+                    mime="application/json"
+                )
     
     def show_robust_import(self):
         """Zeigt die robuste Import-Seite"""
@@ -634,7 +2047,7 @@ class EnhancedTimeMotoApp:
             return
         
         # Import-Manager initialisieren
-        import_manager = ImportManager(self.db_manager.db_manager)
+        import_manager = ImportManager(self.db_manager)
         
         # Import-Strategie wählen
         st.subheader("🎯 Import-Strategie")
@@ -773,17 +2186,36 @@ class EnhancedTimeMotoApp:
         st.header("📋 Zeiterfassungsdaten")
         
         # Filter-Optionen
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            limit = st.selectbox("📊 Anzahl Einträge:", [50, 100, 200, 500, 1000], index=1)
+            limit = st.selectbox("📊 Anzahl Einträge:", [50, 100, 200, 500, 1000, 5000], index=1)
         
         with col2:
+            username_filter = st.selectbox(
+                "👤 Mitarbeiter:",
+                ["Alle"] + sorted(self.db_manager.get_time_entries(limit=1000)['username'].unique().tolist())
+            )
+        
+        with col3:
             if st.button("🔄 Daten aktualisieren"):
                 st.rerun()
         
+        # Datumsfilter
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input("Von:", datetime.now() - timedelta(days=30))
+        with col2:
+            end_date = st.date_input("Bis:", datetime.now())
+        
         # Daten laden
-        df = self.db_manager.get_time_entries(limit)
+        username_param = None if username_filter == "Alle" else username_filter
+        df = self.db_manager.get_time_entries(
+            limit=limit,
+            username=username_param,
+            start_date=start_date,
+            end_date=end_date
+        )
         
         if not df.empty:
             st.info(f"📈 {len(df)} Einträge gefunden")
@@ -803,17 +2235,35 @@ class EnhancedTimeMotoApp:
             )
             
             # Export-Option
-            if st.button("📥 Als CSV exportieren"):
-                try:
-                    csv = df.to_csv(index=False)
-                    st.download_button(
-                        label="💾 CSV herunterladen",
-                        data=csv,
-                        file_name=f"zeiterfassung_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
-                except Exception as e:
-                    st.error(f"Fehler beim CSV-Export: {str(e)}")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📥 Als CSV exportieren"):
+                    try:
+                        csv = df.to_csv(index=False)
+                        st.download_button(
+                            label="💾 CSV herunterladen",
+                            data=csv,
+                            file_name=f"zeiterfassung_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+                    except Exception as e:
+                        st.error(f"Fehler beim CSV-Export: {str(e)}")
+            
+            with col2:
+                if st.button("📥 Als Excel exportieren"):
+                    try:
+                        output = BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            df.to_excel(writer, index=False, sheet_name='Zeiterfassung')
+                        
+                        st.download_button(
+                            label="💾 Excel herunterladen",
+                            data=output.getvalue(),
+                            file_name=f"zeiterfassung_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e:
+                        st.error(f"Fehler beim Excel-Export: {str(e)}")
         else:
             st.info("📭 Keine Daten gefunden. Importieren Sie zuerst TimeMoto Daten.")
     
@@ -863,6 +2313,32 @@ class EnhancedTimeMotoApp:
             if st.button("📊 Statistiken aktualisieren"):
                 st.rerun()
         
+        # Erweiterte Einstellungen
+        st.subheader("🎨 Anzeige-Einstellungen")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            standard_hours = st.number_input(
+                "Standard-Arbeitsstunden pro Tag",
+                min_value=1.0,
+                max_value=12.0,
+                value=8.0,
+                step=0.5,
+                help="Wird für Überstunden-Berechnung verwendet"
+            )
+            st.session_state['standard_hours'] = standard_hours
+        
+        with col2:
+            cost_per_hour = st.number_input(
+                "Stundensatz für Kostenberechnung (€)",
+                min_value=0.0,
+                max_value=200.0,
+                value=35.0,
+                step=5.0,
+                help="Wird für Überstunden-Kostenberechnung verwendet"
+            )
+            st.session_state['cost_per_hour'] = cost_per_hour
+        
         # Konfigurationshilfe
         st.subheader("🔧 Konfiguration")
         
@@ -885,74 +2361,62 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
             </ul>
         </div>
         """, unsafe_allow_html=True)
-    
-    def run(self):
-        """Startet die erweiterte Streamlit Anwendung"""
-        # Header
-        st.markdown("""
-        <div class="main-header">
-            <h1>⏰ TimeMoto Analytics Pro</h1>
-            <p>Erweiterte Zeiterfassung mit KI-gestützten Insights und professionellen Auswertungen</p>
-        </div>
-        """, unsafe_allow_html=True)
         
-        # Sidebar Navigation mit erweiterten Optionen
-        st.sidebar.title("🔧 Navigation")
-        page = st.sidebar.selectbox(
-            "Seite auswählen:",
-            [
-                "🏠 Executive Dashboard",
-                "📊 Team Performance",
-                "📈 Trend-Analysen", 
-                "⏱️ Überstunden-Management",
-                "🏥 Abwesenheits-Analyse",
-                "👤 Mitarbeiter-Details",
-                "📋 Produktivitäts-Matrix",
-                "🎯 KPI-Tracking",
-                "📄 Berichte",
-                "📤 Robuster Import", 
-                "📋 Daten anzeigen", 
-                "⚙️ Einstellungen"
-            ]
-        )
+        # Export/Import von Einstellungen
+        st.subheader("💾 Daten-Management")
         
-        # Erweiterte Seiten-Routing
-        if page == "🏠 Executive Dashboard":
-            self.show_executive_dashboard()
-        elif page == "📊 Team Performance":
-            self.show_team_performance()
-        elif page == "📈 Trend-Analysen":
-            self.show_trend_analysis()
-        elif page == "⏱️ Überstunden-Management":
-            self.show_overtime_management()
-        elif page == "🏥 Abwesenheits-Analyse":
-            self.show_absence_analysis()
-        elif page == "👤 Mitarbeiter-Details":
-            self.show_employee_details()
-        elif page == "📋 Produktivitäts-Matrix":
-            self.show_productivity_matrix()
-        elif page == "🎯 KPI-Tracking":
-            self.show_kpi_tracking()
-        elif page == "📄 Berichte":
-            self.show_reports()
-        elif page == "📤 Robuster Import":
-            self.show_robust_import()
-        elif page == "📋 Daten anzeigen":
-            self.show_data_view()
-        elif page == "⚙️ Einstellungen":
-            self.show_settings()
-    
-    def show_executive_dashboard(self):
-        """Zeigt Executive Dashboard"""
-        st.header("🏠 Executive Dashboard")
+        col1, col2 = st.columns(2)
         
-        # Daten laden
-        df = self.db_manager.get_time_entries(limit=2000)
-        if df.empty:
-            st.info("📭 Keine Daten verfügbar. Bitte importieren Sie zuerst Daten.")
+        with col1:
+            if st.button("🗑️ Alle Daten löschen", type="secondary"):
+                st.warning("⚠️ Diese Aktion kann nicht rückgängig gemacht werden!")
+                if st.button("❌ Wirklich alle Daten löschen?"):
+                    conn = self.db_manager.get_connection()
+                    if conn:
+                        try:
+                            with conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("TRUNCATE TABLE time_entries, import_sessions RESTART IDENTITY CASCADE")
+                                conn.commit()
+                                st.success("✅ Alle Daten wurden gelöscht")
+                                time.sleep(2)
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Fehler beim Löschen: {e}")
+                        finally:
+                            conn.close()
+        
+        with col2:
+            if st.button("📊 Datenbank-Backup erstellen"):
+                conn = self.db_manager.get_connection()
+                if conn:
+                    try:
+                        # Alle Daten exportieren
+                        df = pd.read_sql("SELECT * FROM time_entries", conn)
+                        
+                        # Als Excel speichern
+                        output = BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            df.to_excel(writer, index=False, sheet_name='Backup')
+                        
+                        st.download_button(
+                            label="💾 Backup herunterladen",
+                            data=output.getvalue(),
+                            file_name=f"timemoto_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e:
+                        st.error(f"Fehler beim Backup: {e}")
+                    finally:
+                        conn.close()
+
+# Anwendung starten
+if __name__ == "__main__":
+    app = TimeMotoApp()
+    app.run() Keine Daten verfügbar. Bitte importieren Sie zuerst Daten.")
             return
         
-        analytics = EnhancedTimeMotoAnalytics(df)
+        analytics = TimeMotoAnalytics(df)
         report_gen = ReportGenerator(analytics)
         summary = report_gen.generate_executive_summary()
         
@@ -1028,15 +2492,16 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
                 ))
                 
                 # Trendlinie hinzufügen
-                z = np.polyfit(range(len(daily_data)), daily_data['Gesamt_Arbeitszeit_Std'], 1)
-                p = np.poly1d(z)
-                fig.add_trace(go.Scatter(
-                    x=daily_data['Datum'],
-                    y=p(range(len(daily_data))),
-                    mode='lines',
-                    name='Trend',
-                    line=dict(dash='dash', color='red')
-                ))
+                if len(daily_data) > 1:
+                    z = np.polyfit(range(len(daily_data)), daily_data['Gesamt_Arbeitszeit_Std'], 1)
+                    p = np.poly1d(z)
+                    fig.add_trace(go.Scatter(
+                        x=daily_data['Datum'],
+                        y=p(range(len(daily_data))),
+                        mode='lines',
+                        name='Trend',
+                        line=dict(dash='dash', color='red')
+                    ))
                 
                 fig.update_layout(
                     title="Arbeitszeit-Trend",
@@ -1065,12 +2530,12 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         """Team Performance Dashboard"""
         st.header("📊 Team Performance Dashboard")
         
-        df = self.db_manager.get_time_entries(limit=2000)
+        df = self.db_manager.get_time_entries(limit=5000)
         if df.empty:
             st.info("📭 Keine Daten verfügbar.")
             return
         
-        analytics = EnhancedTimeMotoAnalytics(df)
+        analytics = TimeMotoAnalytics(df)
         
         # Team-Metriken
         workload_dist = analytics.calculate_team_workload_distribution()
@@ -1104,8 +2569,9 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
                 y_col='duration_minutes',
                 title="Arbeitszeit-Varianz pro Mitarbeiter"
             )
-            fig.update_yaxis(title="Minuten")
-            fig.update_xaxis(tickangle=45)
+            if fig:
+                fig.update_yaxis(title="Minuten")
+                fig.update_xaxis(tickangle=45)
             safe_plotly_chart(fig, "Arbeitszeit-Varianz")
         
         with col2:
@@ -1125,12 +2591,12 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         """Trend-Analysen"""
         st.header("📈 Trend-Analysen")
         
-        df = self.db_manager.get_time_entries(limit=2000)
+        df = self.db_manager.get_time_entries(limit=5000)
         if df.empty:
             st.info("📭 Keine Daten verfügbar.")
             return
         
-        analytics = EnhancedTimeMotoAnalytics(df)
+        analytics = TimeMotoAnalytics(df)
         
         # Zeitraum-Auswahl
         col1, col2 = st.columns(2)
@@ -1182,12 +2648,12 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         """Überstunden-Management"""
         st.header("⏱️ Überstunden-Management")
         
-        df = self.db_manager.get_time_entries(limit=2000)
+        df = self.db_manager.get_time_entries(limit=5000)
         if df.empty:
             st.info("📭 Keine Daten verfügbar.")
             return
         
-        analytics = EnhancedTimeMotoAnalytics(df)
+        analytics = TimeMotoAnalytics(df)
         
         # Überstunden berechnen
         overtime_df = analytics.calculate_overtime()
@@ -1206,7 +2672,7 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
                 st.metric("📊 Ø pro Mitarbeiter", f"{avg_overtime_per_person:.1f}h")
             
             with col3:
-                cost_per_hour = 35  # Beispielwert
+                cost_per_hour = st.number_input("💶 Stundensatz", value=35.0, min_value=0.0, step=1.0)
                 st.metric("💰 Geschätzte Kosten", f"{total_overtime * cost_per_hour:.0f}€")
             
             # Überstunden-Trend
@@ -1264,12 +2730,12 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         """Abwesenheits-Analyse"""
         st.header("🏥 Abwesenheits-Analyse")
         
-        df = self.db_manager.get_time_entries(limit=2000)
+        df = self.db_manager.get_time_entries(limit=5000)
         if df.empty:
             st.info("📭 Keine Daten verfügbar.")
             return
         
-        analytics = EnhancedTimeMotoAnalytics(df)
+        analytics = TimeMotoAnalytics(df)
         absence_analysis = analytics.analyze_absence_patterns()
         
         # Insights anzeigen
@@ -1364,12 +2830,12 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         """Detaillierte Mitarbeiter-Ansicht"""
         st.header("👤 Mitarbeiter-Details")
         
-        df = self.db_manager.get_time_entries(limit=2000)
+        df = self.db_manager.get_time_entries(limit=5000)
         if df.empty:
             st.info("📭 Keine Daten verfügbar.")
             return
         
-        analytics = EnhancedTimeMotoAnalytics(df)
+        analytics = TimeMotoAnalytics(df)
         
         # Mitarbeiter auswählen
         selected_employee = st.selectbox(
@@ -1379,7 +2845,7 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         
         # Mitarbeiter-Daten filtern
         employee_data = df[df['username'] == selected_employee]
-        employee_analytics = EnhancedTimeMotoAnalytics(employee_data)
+        employee_analytics = TimeMotoAnalytics(employee_data)
         
         # Metriken
         col1, col2, col3, col4 = st.columns(4)
@@ -1387,7 +2853,7 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         total_days = employee_data['entry_date'].nunique()
         work_days = employee_data[employee_data['absence_name'].isna()]['entry_date'].nunique()
         absence_days = employee_data[employee_data['absence_name'].notna()]['entry_date'].nunique()
-        avg_hours = employee_data['duration_minutes'].mean() / 60
+        avg_hours = employee_analytics.df['duration_minutes'].mean() / 60 if not employee_analytics.df.empty else 0
         
         with col1:
             st.metric("📅 Erfasste Tage", total_days)
@@ -1404,7 +2870,7 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         # Zeitverlauf
         st.subheader("📈 Arbeitszeitverlauf")
         
-        daily_hours = employee_data.groupby('entry_date')['duration_minutes'].sum().reset_index()
+        daily_hours = employee_analytics.df.groupby('entry_date')['duration_minutes'].sum().reset_index()
         daily_hours['hours'] = daily_hours['duration_minutes'] / 60
         
         fig = go.Figure()
@@ -1438,7 +2904,7 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         
         with col1:
             # Start-/Endzeiten
-            time_pattern = employee_data[employee_data['start_time'].str.match(r'^\d{2}:\d{2}$', na=False)].copy()
+            time_pattern = employee_analytics.df[employee_analytics.df['start_time'].str.match(r'^\d{2}:\d{2}$', na=False)].copy()
             if not time_pattern.empty:
                 time_pattern['start_hour'] = pd.to_datetime(time_pattern['start_time'], format='%H:%M').dt.hour
                 
@@ -1453,9 +2919,7 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         
         with col2:
             # Wochentags-Muster
-            weekday_pattern = employee_data.copy()
-            weekday_pattern['weekday'] = pd.to_datetime(weekday_pattern['entry_date']).dt.day_name()
-            weekday_counts = weekday_pattern['weekday'].value_counts()
+            weekday_counts = employee_analytics.df['weekday'].value_counts()
             
             fig = px.bar(
                 x=weekday_counts.index,
@@ -1469,353 +2933,6 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
         """Produktivitäts-Matrix"""
         st.header("📋 Produktivitäts-Matrix")
         
-        df = self.db_manager.get_time_entries(limit=2000)
+        df = self.db_manager.get_time_entries(limit=5000)
         if df.empty:
-            st.info("📭 Keine Daten verfügbar.")
-            return
-        
-        analytics = EnhancedTimeMotoAnalytics(df)
-        productivity_metrics = analytics.calculate_productivity_metrics()
-        
-        if productivity_metrics.empty:
-            st.warning("Nicht genügend Daten für Produktivitätsanalyse")
-            return
-        
-        # Produktivitäts-Scatter
-        fig = px.scatter(
-            productivity_metrics,
-            x='consistency_score',
-            y='punctuality_score',
-            size='avg_daily_hours',
-            color='productivity_score',
-            hover_name='username',
-            title="Produktivitäts-Matrix",
-            labels={
-                'consistency_score': 'Konsistenz-Score',
-                'punctuality_score': 'Pünktlichkeits-Score'
-            },
-            color_continuous_scale='Viridis'
-        )
-        
-        # Quadranten hinzufügen
-        fig.add_hline(y=50, line_dash="dash", line_color="gray")
-        fig.add_vline(x=50, line_dash="dash", line_color="gray")
-        
-        # Quadranten-Labels
-        fig.add_annotation(x=75, y=75, text="High Performer", showarrow=False)
-        fig.add_annotation(x=25, y=75, text="Pünktlich aber inkonsistent", showarrow=False)
-        fig.add_annotation(x=75, y=25, text="Konsistent aber unpünktlich", showarrow=False)
-        fig.add_annotation(x=25, y=25, text="Verbesserungsbedarf", showarrow=False)
-        
-        safe_plotly_chart(fig, "Produktivitäts-Matrix")
-        
-        # Top und Bottom Performer
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("🌟 Top 5 Performer")
-            top_performers = productivity_metrics.nlargest(5, 'productivity_score')[
-                ['username', 'productivity_score', 'avg_daily_hours']
-            ]
-            st.dataframe(top_performers, use_container_width=True)
-        
-        with col2:
-            st.subheader("📉 Verbesserungspotential")
-            bottom_performers = productivity_metrics.nsmallest(5, 'productivity_score')[
-                ['username', 'productivity_score', 'avg_daily_hours']
-            ]
-            st.dataframe(bottom_performers, use_container_width=True)
-        
-        # Detaillierte Metriken
-        st.subheader("📊 Detaillierte Produktivitätsmetriken")
-        
-        # Sortierbare Tabelle
-        st.dataframe(
-            productivity_metrics.style.background_gradient(
-                subset=['productivity_score', 'consistency_score', 'punctuality_score'],
-                cmap='RdYlGn'
-            ),
-            use_container_width=True,
-            height=400
-        )
-    
-    def show_kpi_tracking(self):
-        """KPI-Tracking Dashboard"""
-        st.header("🎯 KPI-Tracking")
-        
-        df = self.db_manager.get_time_entries(limit=2000)
-        if df.empty:
-            st.info("📭 Keine Daten verfügbar.")
-            return
-        
-        analytics = EnhancedTimeMotoAnalytics(df)
-        
-        # KPI-Definitionen
-        st.subheader("📏 KPI-Definitionen")
-        
-        kpi_definitions = {
-            "Anwesenheitsrate": "Prozentsatz der geplanten Arbeitstage ohne Abwesenheit",
-            "Durchschnittliche Arbeitszeit": "Mittlere tägliche Arbeitszeit aller Mitarbeiter",
-            "Überstundenquote": "Prozentsatz der Arbeit über 8 Stunden/Tag",
-            "Pünktlichkeitsrate": "Prozentsatz der Tage mit normalem Arbeitsbeginn",
-            "Team-Effizienz": "Verhältnis von produktiver Zeit zu Anwesenheitszeit"
-        }
-        
-        with st.expander("📖 KPI-Erklärungen"):
-            for kpi, definition in kpi_definitions.items():
-                st.write(f"**{kpi}:** {definition}")
-        
-        # KPI-Berechnung
-        total_days = df['entry_date'].nunique()
-        absence_days = df[df['absence_name'].notna()]['entry_date'].nunique()
-        anwesenheitsrate = ((total_days - absence_days) / total_days * 100) if total_days > 0 else 0
-        
-        avg_work_time = df['duration_minutes'].mean() / 60 if not df.empty else 0
-        
-        overtime_days = df[df['duration_minutes'] > 480]['entry_date'].nunique()
-        überstundenquote = (overtime_days / total_days * 100) if total_days > 0 else 0
-        
-        normal_starts = df[df['time_type'] == 'Normal']['entry_date'].nunique()
-        pünktlichkeitsrate = (normal_starts / total_days * 100) if total_days > 0 else 0
-        
-        # KPI-Dashboard
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            fig = go.Figure(go.Indicator(
-                mode="gauge+number+delta",
-                value=anwesenheitsrate,
-                domain={'x': [0, 1], 'y': [0, 1]},
-                title={'text': "Anwesenheitsrate"},
-                delta={'reference': 95},
-                gauge={
-                    'axis': {'range': [None, 100]},
-                    'bar': {'color': "darkblue"},
-                    'steps': [
-                        {'range': [0, 50], 'color': "lightgray"},
-                        {'range': [50, 80], 'color': "gray"}
-                    ],
-                    'threshold': {
-                        'line': {'color': "red", 'width': 4},
-                        'thickness': 0.75,
-                        'value': 90
-                    }
-                }
-            ))
-            fig.update_layout(height=300)
-            safe_plotly_chart(fig, "Anwesenheitsrate KPI")
-        
-        with col2:
-            fig = go.Figure(go.Indicator(
-                mode="gauge+number+delta",
-                value=avg_work_time,
-                domain={'x': [0, 1], 'y': [0, 1]},
-                title={'text': "Ø Arbeitszeit (h)"},
-                delta={'reference': 8},
-                gauge={
-                    'axis': {'range': [0, 12]},
-                    'bar': {'color': "darkgreen"},
-                    'steps': [
-                        {'range': [0, 6], 'color': "lightgray"},
-                        {'range': [6, 9], 'color': "gray"}
-                    ],
-                    'threshold': {
-                        'line': {'color': "red", 'width': 4},
-                        'thickness': 0.75,
-                        'value': 8
-                    }
-                }
-            ))
-            fig.update_layout(height=300)
-            safe_plotly_chart(fig, "Arbeitszeit KPI")
-        
-        with col3:
-            fig = go.Figure(go.Indicator(
-                mode="gauge+number+delta",
-                value=pünktlichkeitsrate,
-                domain={'x': [0, 1], 'y': [0, 1]},
-                title={'text': "Pünktlichkeitsrate"},
-                delta={'reference': 90},
-                gauge={
-                    'axis': {'range': [None, 100]},
-                    'bar': {'color': "darkorange"},
-                    'steps': [
-                        {'range': [0, 50], 'color': "lightgray"},
-                        {'range': [50, 80], 'color': "gray"}
-                    ],
-                    'threshold': {
-                        'line': {'color': "red", 'width': 4},
-                        'thickness': 0.75,
-                        'value': 85
-                    }
-                }
-            ))
-            fig.update_layout(height=300)
-            safe_plotly_chart(fig, "Pünktlichkeit KPI")
-        
-        # KPI-Verlauf
-        st.subheader("📈 KPI-Entwicklung")
-        
-        # Wöchentliche KPI-Entwicklung berechnen
-        weekly_kpis = []
-        for week_start in pd.date_range(df['entry_date'].min(), df['entry_date'].max(), freq='W'):
-            week_end = week_start + timedelta(days=6)
-            week_data = df[(df['entry_date'] >= week_start) & (df['entry_date'] <= week_end)]
-            
-            if not week_data.empty:
-                week_total_days = week_data['entry_date'].nunique()
-                week_absence_days = week_data[week_data['absence_name'].notna()]['entry_date'].nunique()
-                week_anwesenheit = ((week_total_days - week_absence_days) / week_total_days * 100) if week_total_days > 0 else 0
-                
-                week_avg_time = week_data['duration_minutes'].mean() / 60 if not week_data.empty else 0
-                
-                weekly_kpis.append({
-                    'week': week_start,
-                    'anwesenheitsrate': week_anwesenheit,
-                    'avg_arbeitszeit': week_avg_time
-                })
-        
-        if weekly_kpis:
-            kpi_df = pd.DataFrame(weekly_kpis)
-            
-            fig = make_subplots(
-                rows=2, cols=1,
-                subplot_titles=("Anwesenheitsrate", "Durchschnittliche Arbeitszeit"),
-                vertical_spacing=0.15
-            )
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=kpi_df['week'],
-                    y=kpi_df['anwesenheitsrate'],
-                    mode='lines+markers',
-                    name='Anwesenheitsrate',
-                    line=dict(color='blue')
-                ),
-                row=1, col=1
-            )
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=kpi_df['week'],
-                    y=kpi_df['avg_arbeitszeit'],
-                    mode='lines+markers',
-                    name='Arbeitszeit',
-                    line=dict(color='green')
-                ),
-                row=2, col=1
-            )
-            
-            fig.update_yaxes(title_text="Prozent", row=1, col=1)
-            fig.update_yaxes(title_text="Stunden", row=2, col=1)
-            fig.update_xaxes(title_text="Woche", row=2, col=1)
-            
-            fig.update_layout(height=600, showlegend=False)
-            safe_plotly_chart(fig, "KPI Verlauf")
-    
-    def show_reports(self):
-        """Berichts-Center"""
-        st.header("📄 Berichts-Center")
-        
-        df = self.db_manager.get_time_entries(limit=2000)
-        if df.empty:
-            st.info("📭 Keine Daten verfügbar.")
-            return
-        
-        analytics = EnhancedTimeMotoAnalytics(df)
-        report_gen = ReportGenerator(analytics)
-        
-        # Report-Typ auswählen
-        report_type = st.selectbox(
-            "Bericht auswählen:",
-            ["Executive Summary", "Detaillierter Analysebericht", "Mitarbeiter-Report", "Team-Performance-Report"]
-        )
-        
-        # Zeitraum wählen
-        col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input("Von:", df['entry_date'].min())
-        with col2:
-            end_date = st.date_input("Bis:", df['entry_date'].max())
-        
-        # Report generieren
-        if st.button("📊 Bericht generieren", type="primary"):
-            
-            # Daten filtern
-            filtered_df = df[(df['entry_date'] >= start_date) & (df['entry_date'] <= end_date)]
-            filtered_analytics = EnhancedTimeMotoAnalytics(filtered_df)
-            filtered_report_gen = ReportGenerator(filtered_analytics)
-            
-            if report_type == "Executive Summary":
-                summary = filtered_report_gen.generate_executive_summary()
-                
-                # Summary anzeigen
-                st.markdown("### 📊 Executive Summary")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Mitarbeiter", summary['metrics']['total_employees'])
-                    st.metric("Gesamtstunden", f"{summary['metrics']['total_work_hours']:.0f}h")
-                
-                with col2:
-                    st.metric("Ø Tagesstunden", f"{summary['metrics']['avg_daily_hours']:.1f}h")
-                    st.metric("Abwesenheitsrate", f"{summary['metrics']['absence_rate']:.1f}%")
-                
-                # Insights
-                st.markdown("### 💡 Wichtige Erkenntnisse")
-                for insight in summary['insights']:
-                    st.info(insight)
-                
-                # Empfehlungen
-                st.markdown("### 🎯 Handlungsempfehlungen")
-                for rec in summary['recommendation']:
-                    st.success(rec)
-                
-                # Download-Option
-                report_content = filtered_report_gen.generate_detailed_report()
-                st.download_button(
-                    label="📥 Report als Markdown herunterladen",
-                    data=report_content,
-                    file_name=f"executive_summary_{datetime.now().strftime('%Y%m%d')}.md",
-                    mime="text/markdown"
-                )
-            
-            elif report_type == "Detaillierter Analysebericht":
-                # Umfassender Bericht mit allen Analysen
-                st.markdown("### 📊 Detaillierter Analysebericht")
-                
-                # Verschiedene Analysen durchführen
-                tabs = st.tabs(["Übersicht", "Produktivität", "Abwesenheiten", "Überstunden", "Trends"])
-                
-                with tabs[0]:
-                    summary = filtered_report_gen.generate_executive_summary()
-                    st.write(filtered_report_gen.generate_detailed_report())
-                
-                with tabs[1]:
-                    productivity = filtered_analytics.calculate_productivity_metrics()
-                    st.dataframe(productivity, use_container_width=True)
-                
-                with tabs[2]:
-                    absence = filtered_analytics.analyze_absence_patterns()
-                    if absence['insights']:
-                        for insight in absence['insights']:
-                            st.info(insight)
-                    
-                    if not absence['reason_pattern'].empty:
-                        st.bar_chart(absence['reason_pattern'])
-                
-                with tabs[3]:
-                    overtime = filtered_analytics.calculate_overtime()
-                    if not overtime.empty:
-                        st.metric("Gesamt-Überstunden", f"{overtime['overtime_hours'].sum():.0f}h")
-                        st.line_chart(overtime.groupby('parsed_date')['overtime_hours'].sum())
-                
-                with tabs[4]:
-                    predictions = filtered_analytics.predict_future_workload(14)
-                    if not predictions.empty:
-                        st.line_chart(predictions.groupby('date')['predicted_hours'].sum())
-
-# Anwendung starten
-if __name__ == "__main__":
-    app = EnhancedTimeMotoApp()
-    app.run()
+            st.info("📭
