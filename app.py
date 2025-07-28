@@ -2413,8 +2413,10 @@ DATABASE_URL = "postgresql://user:pass@host-pooler.region.aws.neon.tech/db?sslmo
 # Anwendung starten
 if __name__ == "__main__":
     app = TimeMotoApp()
-    app.run() Keine Daten verfügbar. Bitte importieren Sie zuerst Daten.")
-            return
+    if app.db_manager.get_statistics().get('total_entries', 0) == 0:
+            st.warning("Keine Daten verfügbar. Bitte importieren Sie zuerst Daten.")
+        else:
+            app.run()
         
         analytics = TimeMotoAnalytics(df)
         report_gen = ReportGenerator(analytics)
